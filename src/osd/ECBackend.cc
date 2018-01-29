@@ -2231,6 +2231,7 @@ struct CallClientContexts :
 	   ++j) {
 	to_decode[j->first.shard].claim(j->second);
       }
+      // Not for recovery, only returns bufferlist with data chunks
       int r = ECUtil::decode(
 	ec->sinfo,
 	ec->ec_impl,
