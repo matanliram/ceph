@@ -248,6 +248,10 @@ namespace ceph {
      */
     virtual unsigned int get_coding_chunk_count() const = 0;
 
+    virtual unsigned get_zigzag_duplication() const = 0;
+
+    virtual usigned get_row_count() const = 0;
+
     /**
      * Return the size (in bytes) of a single chunk created by a call
      * to the **decode** method. The returned size multiplied by
@@ -314,6 +318,12 @@ namespace ceph {
     virtual int minimum_to_decode_with_cost(const std::set<int> &want_to_read,
                                             const std::map<int, int> &available,
                                             std::set<int> *minimum) = 0;
+
+    virtual int required_to_reconstruct(
+          const set<int> &chunks_want_to_read,
+          const set<int> &available_chunks,
+          set<int> *needed_chunks,
+          map<int, set<int>> *elements_map) = 0;
 
     /**
      * Encode the content of **in** and store the result in
@@ -444,10 +454,26 @@ namespace ceph {
      * @param [out] decoded concatenante of the data chunks
      * @return **0** on success or a negative errno on error.
      */
-    virtual int decode_concat(const std::map<int, bufferlist> &chunks,
-			      bufferlist *decoded) = 0;
-  };
 
+    virtual int decode_concat(
+        const std::map<int, bufferlist> &chunks,
+        bufferlist *decoded) = 0;
+
+    virtual int reconstruct_concat(
+        const map<int, bufferlist> &chunks,
+        bufferlist *reconstructed) = 0;
+
+    virtual int reconstruct(
+        const set<int> &chunks_to_read,
+        const map<int, bufferlist> &chunks,
+        map<int, bufferlist> *reconstructed) = 0;
+
+    virtual int reconstruct_chunks(
+        const set<int> &want_to_read,
+        const map<int, bufferlist> &chunks,
+        map<int, bufferlist> &reconstructed) = 0;
+
+  }
   typedef std::shared_ptr<ErasureCodeInterface> ErasureCodeInterfaceRef;
 
 }

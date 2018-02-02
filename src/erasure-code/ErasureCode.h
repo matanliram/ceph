@@ -50,10 +50,18 @@ namespace ceph {
 		    CrushWrapper &crush,
 		    std::ostream *ss) const;
 
-    int sanity_check_k(int k, std::ostream *ss);
+    virtual int sanity_check_k(int k, std::ostream *ss);
 
     unsigned int get_coding_chunk_count() const override {
       return get_chunk_count() - get_data_chunk_count();
+    }
+
+    virtual unsigned get_zigzag_duplication() const {
+      return 1;
+    }
+
+    virtual unsigned get_row_count() const {
+      return 1;
     }
 
     int minimum_to_decode(const std::set<int> &want_to_read,
@@ -63,6 +71,12 @@ namespace ceph {
     int minimum_to_decode_with_cost(const std::set<int> &want_to_read,
                                             const std::map<int, int> &available,
                                             std::set<int> *minimum) override;
+
+    virtual int required_to_reconstruct(
+        const set<int> &chunks_want_to_read,
+        const set<int> &available_chunks,
+        set<int> *needed_chunks,
+        map<int, set<int>> *elements_map);
 
     int encode_prepare(const bufferlist &raw,
                        std::map<int, bufferlist> &encoded) const;
@@ -78,9 +92,19 @@ namespace ceph {
                        const std::map<int, bufferlist> &chunks,
                        std::map<int, bufferlist> *decoded) override;
 
+    virtual int reconstruct(
+        const set<int> &chunks_to_read,
+        const map<int, bufferlist> &chunks,
+        map<int, bufferlist> *reconstructed);
+
     int decode_chunks(const std::set<int> &want_to_read,
                               const std::map<int, bufferlist> &chunks,
                               std::map<int, bufferlist> *decoded) override;
+
+    virtual int reconstruct_chunks(
+        const set<int> &want_to_read,
+        const map<int, bufferlist> &chunks,
+        map<int, bufferlist> &reconstructed);
 
     const std::vector<int> &get_chunk_mapping() const override;
 

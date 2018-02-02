@@ -107,6 +107,14 @@ int ErasureCode::minimum_to_decode(const set<int> &want_to_read,
   return 0;
 }
 
+int ErasureCode::required_to_reconstruct(const set<int> &chunks_want_to_read,
+    const set<int> &available_chunks,
+    set<int> *needed_chunks,
+    map<int, set<int> > *elements_map)
+{
+  assert("ErasureCode::required_to_reconstruct not implemented" == 0);
+}
+
 int ErasureCode::minimum_to_decode_with_cost(const set<int> &want_to_read,
                                              const map<int, int> &available,
                                              set<int> *minimum)
@@ -163,6 +171,7 @@ int ErasureCode::encode(const set<int> &want_to_encode,
   unsigned int k = get_data_chunk_count();
   unsigned int m = get_chunk_count() - k;
   bufferlist out;
+  // Sorts data and parity disks according to chunk_mapping:
   int err = encode_prepare(in, *encoded);
   if (err)
     return err;
@@ -220,6 +229,26 @@ int ErasureCode::decode_chunks(const set<int> &want_to_read,
                                map<int, bufferlist> *decoded)
 {
   assert("ErasureCode::decode_chunks not implemented" == 0);
+}
+
+int ErasureCode::reconstruct_concat(const map<int, bufferlist> &chunks,
+    bufferlist *reconstructed)
+{
+  assert("ErasureCode::reconstruct_concat not implemented" == 0);
+}
+
+int ErasureCode::reconstruct(const set<int> &chunks_to_read,
+    const map<int, bufferlist> &chunks,
+    map<int, bufferlist> *reconstructed)
+{
+  assert("ErasureCode::reconstruct not implemented" == 0);
+}
+
+int ErasureCode::reconstruct_chunks(const set<int> &want_to_read,
+    const map<int, bufferlist> &chunks,
+    map<int, bufferlist> &reconstructed)
+{
+  assert("ErasureCode::reconstruct_chunks not implemented" == 0);
 }
 
 int ErasureCode::parse(const ErasureCodeProfile &profile,
