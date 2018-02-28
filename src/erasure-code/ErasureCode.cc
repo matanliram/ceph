@@ -112,7 +112,7 @@ int ErasureCode::required_to_reconstruct(const set<int> &chunks_want_to_read,
     set<int> *needed_chunks,
     map<int, set<int> > *elements_map)
 {
-  assert("ErasureCode::required_to_reconstruct not implemented" == 0);
+  return minimum_to_decode(chunks_want_to_read, available_chunks, needed_chunks);
 }
 
 int ErasureCode::minimum_to_decode_with_cost(const set<int> &want_to_read,
@@ -234,14 +234,14 @@ int ErasureCode::decode_chunks(const set<int> &want_to_read,
 int ErasureCode::reconstruct_concat(const map<int, bufferlist> &chunks,
     bufferlist *reconstructed)
 {
-  assert("ErasureCode::reconstruct_concat not implemented" == 0);
+  return decode_concat(chunks, reconstructed);
 }
 
 int ErasureCode::reconstruct(const set<int> &chunks_to_read,
     const map<int, bufferlist> &chunks,
     map<int, bufferlist> *reconstructed)
 {
-  assert("ErasureCode::reconstruct not implemented" == 0);
+  return decode(chunks_to_read, chunks, reconstructed);
 }
 
 int ErasureCode::reconstruct_chunks(const set<int> &want_to_read,

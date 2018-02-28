@@ -32,9 +32,13 @@ extern "C" {
 #include "ErasureCodeZigzag.h"
 
 // re-include our assert to clobber boost's
-#include "include/assert.h"
 
 #include "ErasureCodeConfigurationsZigzag.h"
+
+#define DEFAULT_RULE_ROOT "default"
+#define DEFAULT_RULE_FAILURE_DOMAIN "osd"
+
+#define dout_context g_ceph_context
 
 #define dout_subsys ceph_subsys_osd
 #undef dout_prefix
@@ -70,29 +74,6 @@ static ostream &operator<<(ostream &lhs, const set<int> &rhs) {
   return lhs << "]";
 }
 
-int ErasureCodeZigzag::create_ruleset(const string &name,
-				   CrushWrapper &crush,
-				   ostream *ss) const
-{
-  if (crush.rule_exists(name)) {
-    *ss << "rule " << name << " exists";
-    return -EEXIST;
-  }
-  if (!crush.name_exists(ruleset_root)) {
-    *ss << "root item " << ruleset_root << " does not exist";
-    return -ENOENT;
-  }
-  
-  int ruleid = crush.add_simple_ruleset(name, ruleset_root, ruleset_failure_domain,
-                                        "indep", pg_pool_t::TYPE_ERASURE, ss);
-  if (ruleid < 0)
-    return ruleid;
-  else {
-    crush.set_rule_mask_max_size(ruleid, get_chunk_count());
-    return crush.get_rule_mask_ruleset(ruleid);
-  }
-}
-
 unsigned ErasureCodeZigzag::get_alignment() const
 {
   // dout(1) << "get_alignment" << dendl;
@@ -113,7 +94,7 @@ int ErasureCodeZigzag::parse(ErasureCodeProfile &profile,
   err |= to_int("perm", profile, &perm, DEFAULT_PERM, ss);
   err |= to_int("align", profile, &align, DEFAULT_ALIGN, ss);
   err |= to_int("w", profile, &w, DEFAULT_W, ss);
-  err |= to_int("desired_stripe", profile, &desired_stripe, DEFAULT_DESIRED_STRIPE, ss);
+  err |= to_int("stripe_unit", profile, &stripe_unit, DEFAULT_STRIPE_UNIT, ss);
 
   if (chunk_mapping.size() > 0 && (int)chunk_mapping.size() != k + r) {
     *ss << "mapping " << profile.find("mapping")->second
@@ -142,25 +123,22 @@ int ErasureCodeZigzag::init(ErasureCodeProfile &profile,
     ostream *ss)
 {
   int err = 0;
-  err |= to_string("ruleset-root", profile,
-      &ruleset_root,
-      DEFAULT_RULESET_ROOT, ss);
-  err |= to_string("ruleset-failure-domain", profile,
-      &ruleset_failure_domain,
-      DEFAULT_RULESET_FAILURE_DOMAIN, ss);
-  if (err)
-    return err;
-
-  // ruleset failure domain will be osd
-  err = to_string("ruleset-failure-domain", profile, &ruleset_failure_domain,
-      DEFAULT_RULESET_ROOT, ss);
+  err |= to_string("crush-root", profile,
+      &rule_root,
+      DEFAULT_RULE_ROOT, ss);
+  err |= to_string("crush-failure-domain", profile,
+      &rule_failure_domain,
+      DEFAULT_RULE_FAILURE_DOMAIN, ss);
+  err |= to_string("crush-device-class", profile,
+		   &rule_device_class,
+		   "", ss);
   if (err)
     return err;
 
   err = parse(profile, ss);
   if (err)
     return err;
-  
+
   err = init_zigzag();
   if (err)
     return err;
@@ -409,8 +387,8 @@ int ErasureCodeZigzag::init_zigzag()//unsigned int object_size)
   if (pZZ_G == NULL) {
       return -EINVAL;
   }
-  
-  unsigned objsize = get_desired_stripe();
+
+  unsigned objsize = get_stripe_unit() * get_data_chunk_count();
   unsigned int blocksize = get_chunk_size(objsize);
   // say objsize is composed of q*blocksize + r, padded_chunks will give k-q
   unsigned int padded_chunks = data_chunk_count - objsize / blocksize;
@@ -673,9 +651,9 @@ int ErasureCodeZigzag::reconstruct(const set<int> &chunks_to_read,
   unsigned blocksize = chunks.begin()->second.length();
   // check that the chunk that we got in reconstruct is of the right size
   dout(1) << "MatanLiramV10: blocksize: " << blocksize << ",chunk_size: "
-    << get_chunk_size(get_desired_stripe()) << dendl;
+    << get_chunk_size(get_stripe_unit() * get_data_chunk_count()) << dendl;
   // asserts we put the right value in desired_stripe
-  assert(blocksize == get_chunk_size(get_desired_stripe()));
+  assert(blocksize == get_chunk_size(get_stripe_unit() * get_data_chunk_count()));
   for (unsigned i = 0; i < k + r; i++) {
     if (chunks.find(i) == chunks.end()) {
       bufferptr ptr(buffer::create_aligned(blocksize, SIMD_ALIGN));
@@ -705,10 +683,12 @@ int ErasureCodeZigzag::reconstruct_chunks(const set<int> &want_to_read,
   }
   dout(1) << "MatanLiramV10: num erasures: " << erasures.size() << ", min erasure"
     << (unsigned) *std::min_element(erasures.begin(), erasures.end()) << dendl;
-  //assert(erasures.size() <= 1 \
-  //    || (unsigned) *std::min_element(erasures.begin(), erasures.end()) \
-  //      >= get_data_chunk_count());
-  // up to r recoveries in case a parity failed
+  /*
+   * assert(erasures.size() <= 1 \
+   *    || (unsigned) *std::min_element(erasures.begin(), erasures.end()) \
+   *      >= get_data_chunk_count());
+   * up to r recoveries in case a parity failed
+   */
 
   // assuming reconstruct_chunks is not called outisde erasure-code folder
   // because reconstructed map is not initialized when calling it separately...

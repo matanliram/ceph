@@ -1,4 +1,4 @@
-// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*- 
+// -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 /*
  * Ceph distributed storage system
@@ -11,7 +11,7 @@
  *  modify it under the terms of the GNU Lesser General Public
  *  License as published by the Free Software Foundation; either
  *  version 2.1 of the License, or (at your option) any later version.
- * 
+ *
  */
 
 #ifndef CEPH_ERASURE_CODE_INTERFACE_H
@@ -24,7 +24,7 @@
     **ErasureCodeInterface** to encode and decode content. All codes
     are systematic (i.e. the data is not mangled and can be
     reconstructed by concatenating chunks ).
-    
+
     Methods returning an **int** return **0** on success and a
     negative value on error. If the value returned on error is not
     explained in **ErasureCodeInterface**, the sources or the
@@ -75,12 +75,12 @@
 
     The interface does not concern itself with stripes nor does it
     impose constraints on the size of each stripe. Variable names in
-    the interface always use **object** and never use **stripe**. 
+    the interface always use **object** and never use **stripe**.
 
     Assuming the interface implementer provides three data chunks ( K
     = 3 ) and two coding chunks ( M = 2 ), a buffer could be encoded as
     follows:
-    
+
     ~~~~~~~~~~~~~~~~{.c}
     set<int> want_to_encode(0, 1, 2, // data chunks
                             3, 4     // coding chunks
@@ -118,13 +118,13 @@
                                 &minimum);
     minimum == set<int>(0, 1, 4); // NOT set<int>(0, 1, 3);
     ~~~~~~~~~~~~~~~~
-    
+
     It sets **minimum** with three chunks to reconstruct the desired
     data chunk and will pick the second coding chunk ( 4 ) because it
     is less expensive ( 1 < 9 ) to retrieve than the first coding
     chunk ( 3 ). The caller is responsible for retrieving the chunks
     and call **decode** to reconstruct the second data chunk.
-    
+
     ~~~~~~~~~~~~~~~~{.c}
     map<int,bufferlist> chunks;
     for i in minimum.keys():
@@ -137,8 +137,8 @@
     The semantic of the cost value is defined by the caller and must
     be known to the implementer. For instance, it may be more
     expensive to retrieve two chunks with cost 1 + 9 = 10 than two
-    chunks with cost 6 + 6 = 12. 
- */ 
+    chunks with cost 6 + 6 = 12.
+ */
 
 #include <map>
 #include <set>
@@ -248,9 +248,9 @@ namespace ceph {
      */
     virtual unsigned int get_coding_chunk_count() const = 0;
 
-    virtual unsigned get_zigzag_duplication() const = 0;
+    virtual unsigned int get_zigzag_duplication() const = 0;
 
-    virtual usigned get_row_count() const = 0;
+    virtual unsigned int get_row_count() const = 0;
 
     /**
      * Return the size (in bytes) of a single chunk created by a call
@@ -320,10 +320,10 @@ namespace ceph {
                                             std::set<int> *minimum) = 0;
 
     virtual int required_to_reconstruct(
-          const set<int> &chunks_want_to_read,
-          const set<int> &available_chunks,
-          set<int> *needed_chunks,
-          map<int, set<int>> *elements_map) = 0;
+          const std::set<int> &chunks_want_to_read,
+          const std::set<int> &available_chunks,
+          std::set<int> *needed_chunks,
+          std::map<int, std::set<int>> *elements_map) = 0;
 
     /**
      * Encode the content of **in** and store the result in
@@ -460,20 +460,20 @@ namespace ceph {
         bufferlist *decoded) = 0;
 
     virtual int reconstruct_concat(
-        const map<int, bufferlist> &chunks,
+        const std::map<int, bufferlist> &chunks,
         bufferlist *reconstructed) = 0;
 
     virtual int reconstruct(
-        const set<int> &chunks_to_read,
-        const map<int, bufferlist> &chunks,
-        map<int, bufferlist> *reconstructed) = 0;
+        const std::set<int> &chunks_to_read,
+        const std::map<int, bufferlist> &chunks,
+        std::map<int, bufferlist> *reconstructed) = 0;
 
     virtual int reconstruct_chunks(
-        const set<int> &want_to_read,
-        const map<int, bufferlist> &chunks,
-        map<int, bufferlist> &reconstructed) = 0;
+        const std::set<int> &want_to_read,
+        const std::map<int, bufferlist> &chunks,
+        std::map<int, bufferlist> &reconstructed) = 0;
 
-  }
+  };
   typedef std::shared_ptr<ErasureCodeInterface> ErasureCodeInterfaceRef;
 
 }

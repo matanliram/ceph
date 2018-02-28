@@ -653,7 +653,7 @@ int ErasureCodeLrc::minimum_to_decode(const set<int> &want_to_read,
 	  //      	 erasures_not_recovered.begin(), erasures_not_recovered.end(),
 	  //      	 inserter(layer_minimum, layer_minimum.end()));
           //
-          // OK: My fix - get only data chunks in that layer...
+          // OK: My fix - get only k chunks from the problematic layer.
           set<int> layer_maximum;
           set_difference(i->chunks_as_set.begin(), i->chunks_as_set.end(),
                         erasures_not_recovered.begin(),erasures_not_recovered.end(),

@@ -102,6 +102,7 @@ ostream &operator<<(ostream &lhs, const ECBackend::read_result_t &rhs)
   } else {
     lhs << ", noattrs";
   }
+  lhs << ", elements_map=" << rhs.elements_map.size();
   return lhs << ", returned=" << rhs.returned << ")";
 }
 
@@ -198,7 +199,8 @@ ECBackend::ECBackend(
   uint64_t stripe_width)
   : PGBackend(cct, pg, store, coll, ch),
     ec_impl(ec_impl),
-    sinfo(ec_impl->get_data_chunk_count(), stripe_width) {
+    sinfo(ec_impl->get_data_chunk_count(), stripe_width, ec_impl->get_row_count(),
+        ec_impl->get_zigzag_duplication()) {
   assert((ec_impl->get_data_chunk_count() *
 	  ec_impl->get_chunk_size(stripe_width)) == stripe_width);
 }
@@ -244,7 +246,8 @@ struct OnRecoveryReadComplete :
       hoid,
       res.returned.back(),
       res.attrs,
-      in.first);
+      in.first,
+      res.elements_map);
   }
 };
 
@@ -269,6 +272,28 @@ struct RecoveryMessages {
 	  new OnRecoveryReadComplete(
 	    ec,
 	    hoid))));
+  }
+
+  void read( // Overloading
+    ECBackend *ec,
+    const hobject_t &hoid, uint64_t off, uint64_t len,
+    const set<pg_shard_t> &need,
+    bool attrs,
+    const map<int, set<int> > &elements_map) {
+    list<boost::tuple<uint64_t, uint64_t, uint32_t> > to_read;
+    to_read.push_back(boost::make_tuple(off, len, 0));
+    assert(!reads.count(hoid));
+    reads.insert(
+      make_pair(
+	hoid,
+	ECBackend::read_request_t(
+	  to_read,
+	  need,
+	  attrs,
+	  new OnRecoveryReadComplete(
+	    ec,
+	    hoid),
+          elements_map)));
   }
 
   map<pg_shard_t, vector<PushOp> > pushes;
@@ -384,7 +409,8 @@ void ECBackend::handle_recovery_read_complete(
   const hobject_t &hoid,
   boost::tuple<uint64_t, uint64_t, map<pg_shard_t, bufferlist> > &to_read,
   boost::optional<map<string, bufferlist> > attrs,
-  RecoveryMessages *m)
+  RecoveryMessages *m,
+  const map<int, set<int> > &elements_map)
 {
   dout(10) << __func__ << ": returned " << hoid << " "
 	   << "(" << to_read.get<0>()
@@ -401,12 +427,54 @@ void ECBackend::handle_recovery_read_complete(
        ++i) {
     target[*i] = &(op.returned_data[*i]);
   }
+  uint64_t element_size = sinfo.get_chunk_size() / sinfo.get_row_count();
+  assert(sinfo.get_chunk_size() % sinfo.get_row_count() == 0);
   map<int, bufferlist> from;
+  // The to_read is "returned" of read_result_t. We iterate on the
+  // concatenated bufferlist from each element.
   for(map<pg_shard_t, bufferlist>::iterator i = to_read.get<2>().begin();
       i != to_read.get<2>().end();
       ++i) {
-    from[i->first.shard].claim(i->second);
-  }
+    if (elements_map.size() == 0) {
+      from[i->first.shard].claim(i->second);
+    } else if (elements_map.find(i->first.shard) == elements_map.end()) {
+      dout(1) << __func__ << "got the buffer of parity shard " << i->first.shard
+          << " of size " << i->second << ", appending zeros" << dendl;
+      from[i->first.shard].append_zero(sinfo.get_chunk_size());
+    } else { // elements_map is relevant to this chunk
+      dout(1) << __func__ << "length of bufferlist received (" << 
+          i->first.shard << ") is " << i->second.length() << dendl;
+      // risky change here
+      from[i->first.shard].clear();
+      assert(elements_map.find(i->first.shard) != elements_map.end());
+      const set<int> &elements = elements_map.find(i->first.shard)->second;
+      int prev_element = 0;
+      int count = 0; // element num
+      for (set<int>::const_iterator j = elements.begin(); j != elements.end();
+          ++j, ++count) {
+        // number of zero element blocks needed to add to decode
+        const int zero_size = *j - prev_element;
+        dout(1) << __func__ << "zero size: " << zero_size << dendl;
+        // we don't nullify the element itself, therefore the +1 is important
+        prev_element = *j+1;
+        // append zeros if needed:
+        if (zero_size > 0) {
+          from[i->first.shard].append_zero(element_size * zero_size);
+        }
+        bufferlist subbuf;
+        subbuf.substr_of(i->second, element_size * count, element_size);
+        dout(1) << __func__ << "subbuf size: " << subbuf.length() << dendl;
+        from[i->first.shard].claim_append(subbuf); // append 1 more element
+        // TODO: optimize to append more than 1 element if possible.
+      }
+      // zeroes up to the last row
+      if (sinfo.get_row_count() - prev_element > 0) {
+        from[i->first.shard].append_zero(
+            element_size * (sinfo.get_row_count() - prev_element));
+      }
+      assert(from[i->first.shard].length() == sinfo.get_chunk_size());
+    }
+  } // end of chunk iteration for loop
   dout(10) << __func__ << ": " << from << dendl;
   int r = ECUtil::decode(sinfo, ec_impl, from, target);
   assert(r == 0);
@@ -542,6 +610,7 @@ void ECBackend::continue_recovery_op(
       set<int> want(op.missing_on_shards.begin(), op.missing_on_shards.end());
       uint64_t from = op.recovery_progress.data_recovered_to;
       uint64_t amount = get_recovery_chunk_size();
+      map<int, set<int> > elements_map = map<int, set<int> >();
 
       if (op.recovery_progress.first && op.obc) {
 	/* We've got the attrs and the hinfo, might as well use them */
@@ -553,7 +622,7 @@ void ECBackend::continue_recovery_op(
 
       set<pg_shard_t> to_read;
       int r = get_min_avail_to_read_shards(
-	op.hoid, want, true, false, &to_read);
+	op.hoid, want, true, false, &to_read, elements_map);
       if (r != 0) {
 	// we must have lost a recovery source
 	assert(!op.recovery_progress.first);
@@ -569,7 +638,10 @@ void ECBackend::continue_recovery_op(
 	op.recovery_progress.data_recovered_to,
 	amount,
 	to_read,
-	op.recovery_progress.first && !op.obc);
+	op.recovery_progress.first && !op.obc,
+        elements_map);
+      // Used in READING state, to say that we finished recovering all the
+      // stripes in length of recovery_max_chunk.
       op.extent_requested = make_pair(
 	from,
 	amount);
@@ -582,6 +654,8 @@ void ECBackend::continue_recovery_op(
       assert(op.returned_data.size());
       op.state = RecoveryOp::WRITING;
       ObjectRecoveryProgress after_progress = op.recovery_progress;
+      // Extent_requested.second is always recovery_max_chunk
+      // which is some multiple of the stripe size.
       after_progress.data_recovered_to += op.extent_requested.second;
       after_progress.first = false;
       if (after_progress.data_recovered_to >= op.obc->obs.oi.size) {
@@ -590,11 +664,12 @@ void ECBackend::continue_recovery_op(
 	    op.obc->obs.oi.size);
 	after_progress.data_complete = true;
       }
+      // Iterate over shards we can recover from (on and missing)
       for (set<pg_shard_t>::iterator mi = op.missing_on.begin();
 	   mi != op.missing_on.end();
 	   ++mi) {
 	assert(op.returned_data.count(mi->shard));
-	m->pushes[*mi].push_back(PushOp());
+	m->pushes[*mi].push_back(PushOp()); // write op to all missing shards
 	PushOp &pop = m->pushes[*mi].back();
 	pop.soid = op.hoid;
 	pop.version = op.v;
@@ -621,6 +696,7 @@ void ECBackend::continue_recovery_op(
 	pop.recovery_info = op.recovery_info;
 	pop.before_progress = op.recovery_progress;
 	pop.after_progress = after_progress;
+        // If not primary, begin_peer_recover in primary,
 	if (*mi != get_parent()->primary_shard())
 	  get_parent()->begin_peer_recover(
 	    *mi,
@@ -661,7 +737,7 @@ void ECBackend::continue_recovery_op(
 	  dout(10) << __func__ << ": WRITING continue " << op << dendl;
 	  continue;
 	}
-      }
+      } // otherwise still waiting for PushOps!
       return;
     }
     // should never be called once complete
@@ -772,6 +848,7 @@ bool ECBackend::_handle_message(
     reply->min_epoch = get_parent()->get_interval_start_epoch();
     handle_sub_read(op->op.from, op->op, &(reply->op), _op->pg_trace);
     reply->trace = _op->pg_trace;
+    // Notice that not all OSDs receive EC read message, id is decided here
     get_parent()->send_message_osd_cluster(
       op->op.from.osd, reply, get_parent()->get_epoch());
     return true;
@@ -979,12 +1056,255 @@ void ECBackend::handle_sub_write(
   get_parent()->queue_transactions(tls, msg);
 }
 
+template <typename MapIterator>
+bool ECBackend::handle_aggressive_sub_read(
+  pg_shard_t from,
+  const ECSubRead &op,
+  ECSubReadReply *reply,
+  const ZTracer::Trace &trace,
+  MapIterator &i,
+  int &r,
+  shard_id_t &shard,
+  ECUtil::HashInfoRef &hinfo)
+{
+  // If list is not empty:
+  if (i->second.begin() == i->second.end()) {
+    return true;
+  }
+
+  uint64_t aggressive_off = i->second.front().template get<0>();
+  // works well for reads of size 1
+  const boost::tuple<uint64_t, uint64_t, uint32_t>& list_back = i->second.back();
+  uint64_t aggressive_len = list_back.get<0>() + list_back.get<1>() \
+                            - aggressive_off;
+  bufferlist tmpbl;
+  // read all at once from disk
+  if (aggressive_len > 0) {
+    r = store->read(
+        ch, // ObjectStore::CollectionHandle
+        ghobject_t(i->first, ghobject_t::NO_GEN, shard),
+        aggressive_off,
+        aggressive_len,
+        tmpbl, list_back.get<2>()); // Allow EIO return
+  } else {
+    r = 0;
+  }
+  if (r < 0) {
+    get_parent()->clog_error() << __func__
+      << ": Error " << r
+      << " reading "
+      << i->first;
+    dout(5) << __func__ << ": Error " << r
+      << " reading " << i->first << dendl;
+    return true;
+  } else {
+    // send what you got principle, if we got conservative to_read we
+    // reply conservatively, otherwise we reply trivially (lots of messages).
+    for (auto j =
+        i->second.begin(); j != i->second.end(); ++j) {
+      bufferlist bl;
+      bl.substr_of(tmpbl, j->template get<0>() - aggressive_off, j->template get<1>());
+      dout(20) << __func__ << " read request=" << j->template get<1>() << " r=" << r
+        << " len=" << bl.length() << dendl;
+      reply->buffers_read[i->first].push_back(
+          make_pair(
+            j->template get<0>(),
+            bl)
+          );
+      if (!get_parent()->get_pool().allows_ecoverwrites()) {
+        // This shows that we still need deep scrub because large enough files
+        // are read in sections, so the digest check here won't be done here.
+        // Do NOT check osd_read_eio_on_bad_digest here.  We need to report
+        // the state of our chunk in case other chunks could substitute.
+        assert(hinfo->has_chunk_hash());
+        if ((bl.length() == hinfo->get_total_chunk_size()) &&
+            (j->template get<0>() == 0)) {
+          dout(20) << __func__ << ": Checking hash of " << i->first << dendl;
+          bufferhash h(-1);
+          h << bl;
+          if (h.digest() != hinfo->get_chunk_hash(shard)) {
+            get_parent()->clog_error() << "Bad hash for " << i->first << " digest 0x"
+                                       << hex << h.digest() << " expected 0x" << hinfo->get_chunk_hash(shard) << dec;
+            dout(5) << __func__ << ": Bad hash for " << i->first << " digest 0x"
+                    << hex << h.digest() << " expected 0x" << hinfo->get_chunk_hash(shard) << dec << dendl;
+            r = -EIO;
+            return true;
+          }
+        }
+      } // endof hash check
+    } // endof to_read iteration
+  } // endof success in reading
+  return false;
+}
+
+template <typename MapIterator>
+bool ECBackend::handle_trivial_sub_read(
+  pg_shard_t from,
+  const ECSubRead &op,
+  ECSubReadReply *reply,
+  const ZTracer::Trace &trace,
+  MapIterator &i,
+  int &r,
+  shard_id_t &shard,
+  ECUtil::HashInfoRef &hinfo)
+{
+  for (auto j = i->second.begin(); j != i->second.end(); ++j) {
+    bufferlist bl;
+    r = store->read(
+      ch,
+      ghobject_t(i->first, ghobject_t::NO_GEN, shard),
+      j->template get<0>(),
+      j->template get<1>(),
+      bl, j->template get<2>());
+    if (r < 0) {
+      get_parent()->clog_error() << "Error " << r
+                                 << " reading object "
+                                 << i->first;
+      dout(5) << __func__ << ": Error " << r
+              <<" reading " << i->first << dendl;
+      return true;
+    } else {
+      dout(20) << __func__ << " read request=" << j->template get<1>() << " r=" << r << " len=" << bl.length() << dendl;
+      reply->buffers_read[i->first].push_back(
+        make_pair(
+          j->template get<0>(),
+          bl)
+        );
+    }
+
+    if (!get_parent()->get_pool().allows_ecoverwrites()) {
+      // This shows that we still need deep scrub because large enough files
+      // are read in sections, so the digest check here won't be done here.
+      // Do NOT check osd_read_eio_on_bad_digest here.  We need to report
+      // the state of our chunk in case other chunks could substitute.
+      assert(hinfo->has_chunk_hash());
+      if ((bl.length() == hinfo->get_total_chunk_size()) &&
+          (j->template get<0>() == 0)) {
+        dout(20) << __func__ << ": Checking hash of " << i->first << dendl;
+        bufferhash h(-1);
+        h << bl;
+        if (h.digest() != hinfo->get_chunk_hash(shard)) {
+          get_parent()->clog_error() << "Bad hash for " << i->first << " digest 0x"
+                                     << hex << h.digest() << " expected 0x" << hinfo->get_chunk_hash(shard) << dec;
+          dout(5) << __func__ << ": Bad hash for " << i->first << " digest 0x"
+                  << hex << h.digest() << " expected 0x" << hinfo->get_chunk_hash(shard) << dec << dendl;
+          r = -EIO;
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+template <typename MapIterator>
+bool ECBackend::handle_conservative_sub_read(
+  pg_shard_t from,
+  const ECSubRead &op,
+  ECSubReadReply *reply,
+  const ZTracer::Trace &trace,
+  MapIterator &i,
+  int &r,
+  shard_id_t &shard,
+  ECUtil::HashInfoRef &hinfo)
+{
+  // If list is not empty:
+  if (i->second.begin() == i->second.end()) {
+    return false;
+  }
+  // Iterate over element ids in elements_map's kth column
+  // otherwise not yet implemented
+  assert(ECBackend::net_type == ReadType::Trivial);
+  uint64_t element_size = sinfo.get_chunk_size() / sinfo.get_row_count();
+  uint64_t subchunk_start = i->second.front().template get<0>();
+  uint64_t subchunk_len = i->second.front().template get<1>();
+  dout(1) << "MatanLiramV10: element_size: " << element_size << " subchunk_start: "
+    << subchunk_start << " subchunk_len: " << subchunk_len << dendl;
+  // We assume implicitly that elements are sorted ascendingly
+  for (auto j = i->second.begin(); j != i->second.end(); ++j) {
+    bufferlist bl;
+    // If this read is sequential, skip to the last chunk in the continuous part
+    if (std::next(j) != i->second.end()
+        && std::next(j)->template get<0>() == \
+          j->template get<0>() + j->template get<1>()) {
+      // skip this read
+      assert(j->template get<1>() == element_size); // assert trivial network
+      subchunk_len += j->template get<1>();
+      continue;
+    }
+    if (j->template get<1>() > 0) { // or subchunk_len > 0 if there's no extreme case
+      dout(1) << "MatanLiramV10: conservatively read: [" << subchunk_start << ","
+        << subchunk_len << "]" << dendl;
+      r = store->read(
+          ch, // ObjectStore::CollectionHandle
+          ghobject_t(i->first, ghobject_t::NO_GEN, shard),
+          subchunk_start,
+          subchunk_len,
+          bl, j->template get<2>());
+    } else { // If read is empty, don't ask objectstore to read
+      r = 0;
+    }
+    if (r < 0) {
+      get_parent()->clog_error() << __func__
+        << ": Error " << r
+        << " reading "
+        << i->first;
+      dout(5) << __func__ << ": Error " << r
+        << " reading " << i->first << dendl;
+      return true;
+    } else { // read succeeded
+      dout(20) << __func__ << " read request=" << j->template get<1>() << " r=" << r
+        << " len=" << bl.length() << dendl;
+      // Make sure that we know how to read buffers_read later
+      for (unsigned k = 0; k < subchunk_len; k += element_size) {
+        bufferlist element_bl;
+        // from element_offset to beginning of next element
+        element_bl.substr_of(bl, k, element_size);
+        reply->buffers_read[i->first].push_back(
+            make_pair(
+              subchunk_start + k,
+              element_bl)
+            );
+      }
+    }
+    
+    // MatanLiramV6: gives -EIO, check why hash is bad after our changes...
+    // This shows that we still need deep scrub because large enough files
+    // are read in sections, so the digest check here won't be done here.
+    // Do NOT check osd_read_eio_on_bad_digest here.  We need to report
+    // the state of our chunk in case other chunks could substitute.
+    if ((bl.length() == hinfo->get_total_chunk_size()) &&
+        (subchunk_start == 0)) { //j->get<0>() == 0)) {
+      dout(20) << __func__ << ": Checking hash of " << i->first << dendl;
+      bufferhash h(-1);
+      h << bl;
+      if (h.digest() != hinfo->get_chunk_hash(shard)) {
+        get_parent()->clog_error() << __func__ << ": Bad hash for " << i->first
+          << " digest 0x" << hex << h.digest() << " expected 0x"
+          << hinfo->get_chunk_hash(shard) << dec << "\n";
+        dout(5) << __func__ << ": Bad hash for " << i->first << " digest 0x"
+          << hex << h.digest() << " expected 0x" << hinfo->get_chunk_hash(shard)
+          << dec << dendl;
+        r = -EIO;
+        return true;
+      }
+    }
+
+    if (std::next(j) != i->second.end()) {
+      subchunk_len = element_size;
+      subchunk_start = std::next(j)->template get<0>();
+    }
+  } // endof to_read iteration
+  return false;
+}
+
 void ECBackend::handle_sub_read(
   pg_shard_t from,
   const ECSubRead &op,
   ECSubReadReply *reply,
   const ZTracer::Trace &trace)
 {
+  bool is_error = false;
   trace.event("handle sub read");
   shard_id_t shard = get_parent()->whoami_shard().shard;
   for(auto i = op.to_read.begin();
@@ -1002,51 +1322,29 @@ void ECBackend::handle_sub_read(
 	goto error;
       }
     }
-    for (auto j = i->second.begin(); j != i->second.end(); ++j) {
-      bufferlist bl;
-      r = store->read(
-	ch,
-	ghobject_t(i->first, ghobject_t::NO_GEN, shard),
-	j->get<0>(),
-	j->get<1>(),
-	bl, j->get<2>());
-      if (r < 0) {
-	get_parent()->clog_error() << "Error " << r
-				   << " reading object "
-				   << i->first;
-	dout(5) << __func__ << ": Error " << r
-		<< " reading " << i->first << dendl;
-	goto error;
-      } else {
-        dout(20) << __func__ << " read request=" << j->get<1>() << " r=" << r << " len=" << bl.length() << dendl;
-	reply->buffers_read[i->first].push_back(
-	  make_pair(
-	    j->get<0>(),
-	    bl)
-	  );
-      }
-
-      if (!get_parent()->get_pool().allows_ecoverwrites()) {
-	// This shows that we still need deep scrub because large enough files
-	// are read in sections, so the digest check here won't be done here.
-	// Do NOT check osd_read_eio_on_bad_digest here.  We need to report
-	// the state of our chunk in case other chunks could substitute.
-	assert(hinfo->has_chunk_hash());
-	if ((bl.length() == hinfo->get_total_chunk_size()) &&
-	    (j->get<0>() == 0)) {
-	  dout(20) << __func__ << ": Checking hash of " << i->first << dendl;
-	  bufferhash h(-1);
-	  h << bl;
-	  if (h.digest() != hinfo->get_chunk_hash(shard)) {
-	    get_parent()->clog_error() << "Bad hash for " << i->first << " digest 0x"
-				       << hex << h.digest() << " expected 0x" << hinfo->get_chunk_hash(shard) << dec;
-	    dout(5) << __func__ << ": Bad hash for " << i->first << " digest 0x"
-		    << hex << h.digest() << " expected 0x" << hinfo->get_chunk_hash(shard) << dec << dendl;
-	    r = -EIO;
-	    goto error;
-	  }
-	}
-      }
+    // Aggressive reads are implemented as follows: we get
+    // conservative in the buffer from start_read_op(), take the first and last
+    // positions and read between them. Then naming the first position firstoff,
+    // in order to read x,len we copy x-firstoff,len from the given buffer.
+    switch (ECBackend::read_type)
+    {
+    case ReadType::Aggressive:
+      is_error = handle_aggressive_sub_read(from, op, reply, trace, i, r, shard, hinfo);
+      break;
+    case ReadType::Trivial:
+      is_error = handle_trivial_sub_read(from, op, reply, trace, i, r, shard, hinfo);
+      break;
+    case ReadType::Conservative:
+      is_error = handle_conservative_sub_read(from, op, reply, trace, i, r, shard,
+          hinfo);
+      break;
+    default:
+      dout(1) << __func__ << "Invalid read type." << dendl;
+      goto error;
+      break;
+    }
+    if (is_error) {
+      goto error;
     }
     continue;
 error:
@@ -1120,29 +1418,83 @@ void ECBackend::handle_sub_read_reply(
 {
   trace.event("ec sub read reply");
   dout(10) << __func__ << ": reply " << op << dendl;
+  // tid stands for transaction id and it's a uint64_t.
   map<ceph_tid_t, ReadOp>::iterator iter = tid_to_read_map.find(op.tid);
   if (iter == tid_to_read_map.end()) {
     //canceled
     dout(20) << __func__ << ": dropped " << op << dendl;
     return;
   }
+  // Needs it to progress buffers_read to next chunk
+  uint64_t chunk_size = sinfo.get_chunk_size();
+  // For renewing asserts
+  uint64_t element_size = chunk_size / sinfo.get_row_count();
+  dout(1) << "MatanLiramV5: chunk size in handle_sub_read_reply is: " <<
+    chunk_size << dendl;
   ReadOp &rop = iter->second;
+  // buffers_read have start_offset, contents buffer pair, constructed
+  // in handle_sub_read.
   for (auto i = op.buffers_read.begin();
        i != op.buffers_read.end();
        ++i) {
-    assert(!op.errors.count(i->first));	// If attribute error we better not have sent a buffer
+    dout(1) << __func__ << "buffers_read list is of size: " << i->second.size()
+      << dendl;
+    // If attribute error we better not have sent a buffer
+    assert(!op.errors.count(i->first));
     if (!rop.to_read.count(i->first)) {
       // We canceled this read! @see filter_read_op
       dout(20) << __func__ << " to_read skipping" << dendl;
       continue;
     }
+    // Get the to_read of read_request_t obj
+    // rop.to_red.find(..)->second is read_request_t.
+    // We are iterating over its to_read.
     list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator req_iter =
       rop.to_read.find(i->first)->second.to_read.begin();
+    // Pass elements_map to read_result_t:
+    dout(1) << __func__ << "complete has " << rop.complete.size()
+      << "elements." << dendl;
+    const map<int, set<int> > &elements_map = rop.to_read.find(
+        i->first)->second.elements_map;
+    dout(1) << __func__ << "elements_map size is: " << elements_map.size()
+      << dendl;
+
+    // Notice tht rop.complete needs the read_result_t to be updated once,
+    // while this function is called in each of the local OSDs of the PG.
+    // Therefore we update it only if its elements_map is not initialized.
+    if (elements_map.size() > 0 &&
+          (rop.complete.count(i->first) == 0 ||
+           rop.complete.find(i->first)->second.elements_map.size() == 0)) {
+      // rop.to_read is a map from hobject_t to read_request_t, so we get the
+      // elements map from read_request_t and pass it to read_result_t.
+      //
+      // What happened here is that std::map::operator[] calls empty c'tor,
+      // which makes it impossible to initialize read_result_t's
+      // const elements_map&. Therefore we used the "insert" method instead,
+      // but we also want to make sure the key was not initialized before
+      // because it doesn't make sense that an hobject_t key will have 2 different
+      // read_result_t values.
+      dout(1) << "MatanLiramV6: Initializing elements_map in read_result_t"
+        << dendl;
+      // apparently insert cannot override elements, we have no elements_map in
+      // result... -.-
+      // rop.complete.insert(map<hobject_t, read_result_t>::value_type(
+      //       i->first, read_result_t(elements_map)));
+      // MatanLiramV7: fix elements_map to be non-const, then we can update it
+      // using operator[].
+      rop.complete[i->first].elements_map = elements_map;
+    }
+
     list<
       boost::tuple<
 	uint64_t, uint64_t, map<pg_shard_t, bufferlist> > >::iterator riter =
       rop.complete[i->first].returned.begin();
-    for (list<pair<uint64_t, bufferlist> >::iterator j = i->second.begin();
+    // Each read request (req_iter) corresponds to a full chunk read while
+    // each buffers_read element (j) corresponds to a single element read.
+    // We can concatenate all j reads of the same chunk into the same bufferlist
+    // in riter, and then add zeroes in decode (or use a special decode).
+    // riter is initialized by full chunk reads in start_read_op.
+    /*for (list<pair<uint64_t, bufferlist> >::iterator j = i->second.begin();
 	 j != i->second.end();
 	 ++j, ++req_iter, ++riter) {
       assert(req_iter != rop.to_read.find(i->first)->second.to_read.end());
@@ -1152,12 +1504,54 @@ void ECBackend::handle_sub_read_reply(
 	  make_pair(req_iter->get<0>(), req_iter->get<1>()));
       assert(adjusted.first == j->first);
       riter->get<2>()[from].claim(j->second);
+    }*/
+    for (list<pair<uint64_t, bufferlist> >::iterator j = i->second.begin();
+        j != i->second.end();
+        ++req_iter, ++riter) {
+      // MatanLiramDoc: asserts req_iter didn't get to end while still
+      // iterating on j
+      assert(req_iter != rop.to_read.find(i->first)->second.to_read.end());
+      // same thing with result_iter,
+      assert(riter != rop.complete[i->first].returned.end());
+      // Chunk aligned whereas our reads are element aligned.
+      pair<uint64_t, uint64_t> adjusted =
+        sinfo.aligned_offset_len_to_chunk(
+            make_pair(req_iter->get<0>(), req_iter->get<1>()));
+      // If we advance j to the next chunk each time, this should be correct
+      dout(1) << "adjusted.first: " << adjusted.first << " and j->first: "
+        << j->first << dendl;
+      // Could be that read starts from not-zero element:
+      assert(j->first % element_size == 0);
+      assert(adjusted.first <= j->first && adjusted.first + chunk_size > j->first);
+      // Claim is "sort-of-like-assignment-op" (according to buffer.cc)
+      // Need to separate appended ops before we hand them to Ido,
+      // maybe in reconstruct_concat, or maybe before (makes a bit more sense to
+      // do it before because it's implementation dependent and not related to
+      // the plugin).
+
+      // Inserting chunk sent from OSD "from" to read_result_t.
+      // Iterate over j until we're at the next chunk, add read buffers from
+      // chunk to returned bufferlist in riter.
+      riter->get<2>()[from].clear(); // empty buffer
+      uint64_t recovery_chunk = get_recovery_chunk_size() / sinfo.get_k();
+      dout(1) << __func__ << "recovery chunk size is: " << recovery_chunk
+        << dendl;
+      for (; j != i->second.end() && j->first < adjusted.first + recovery_chunk;
+          ++j) {
+        // Should work also when bl is empty in case of an empty
+        // shard read when recovering a coding chunk.
+        dout(1) << __func__ << "read starts in " << j->first << dendl;
+        riter->get<2>()[from].claim_append(j->second);
+      }
     }
   }
+
+  // Searched for assertion errors here:
   for (auto i = op.attrs_read.begin();
        i != op.attrs_read.end();
        ++i) {
-    assert(!op.errors.count(i->first));	// if read error better not have sent an attribute
+    // if read error better not have sent an attribute
+    assert(!op.errors.count(i->first));
     if (!rop.to_read.count(i->first)) {
       // We canceled this read! @see filter_read_op
       dout(20) << __func__ << " to_read skipping" << dendl;
@@ -1202,10 +1596,16 @@ void ECBackend::handle_sub_read_reply(
         dout(20) << __func__ << " have shard=" << j->first.shard << dendl;
       }
       set<int> want_to_read, dummy_minimum;
+      // Get shard ids corresponding to chunks  0 to k-1.
       get_want_to_read_shards(&want_to_read);
       int err;
-      if ((err = ec_impl->minimum_to_decode(want_to_read, have, &dummy_minimum)) < 0) {
-	dout(20) << __func__ << " minimum_to_decode failed" << dendl;
+      // Changed interface to required_to_reconstruct
+      // required_to_reconstruct returns -EINVAL only if #erasures > 1.
+      // It means we'll never enter this sequence in our experiments
+      dout(1) << __func__ << "required_to_reconstruct Flow 1" << dendl;
+      if ((err = ec_impl->required_to_reconstruct(want_to_read, have,
+              &dummy_minimum, static_cast<map<int, set<int> >*>(0))) < 0) {
+        dout(20) << __func__ << "required_to_reconstruct failed" << dendl;
         if (rop.in_progress.empty()) {
 	  // If we don't have enough copies and we haven't sent reads for all shards
 	  // we can send the rest of the reads, if any.
@@ -1225,7 +1625,7 @@ void ECBackend::handle_sub_read_reply(
 	  rop.complete[iter->first].r = err;
 	  ++is_complete;
 	}
-      } else {
+      } else { // required_to_reconstruct succeeded
         assert(rop.complete[iter->first].r == 0);
 	if (!rop.complete[iter->first].errors.empty()) {
 	  if (cct->_conf->osd_read_ec_check_for_errors) {
@@ -1259,16 +1659,25 @@ void ECBackend::complete_read_op(ReadOp &rop, RecoveryMessages *m)
     rop.to_read.begin();
   map<hobject_t, read_result_t>::iterator resiter =
     rop.complete.begin();
+  // Num of objects requested to read are all read.
   assert(rop.to_read.size() == rop.complete.size());
   for (; reqiter != rop.to_read.end(); ++reqiter, ++resiter) {
-    if (reqiter->second.cb) {
+    if (reqiter->second.cb) { // if request has a callback, call it (i.e. decode)
+      dout(1) << __func__ << "elements map is of len "
+        << resiter->second.elements_map.size() << dendl;
       pair<RecoveryMessages *, read_result_t &> arg(
 	m, resiter->second);
+      // In case of a parity element read fault (hash probably), that's how
+      // we get informed about it:
+      if (!resiter->second.errors.empty()) {
+        dout(0) << "MatanLiramV8: assert empty has failed: " << resiter->second.errors
+          << dendl;
+      }
       reqiter->second.cb->complete(arg);
       reqiter->second.cb = NULL;
     }
   }
-  tid_to_read_map.erase(rop.tid);
+  tid_to_read_map.erase(rop.tid); // erase transaction
 }
 
 struct FinishReadOp : public GenContext<ThreadPool::TPHandle&>  {
@@ -1485,12 +1894,14 @@ void ECBackend::call_write_ordered(std::function<void(void)> &&cb) {
   }
 }
 
+// Added elements_map which maps to_read shards to the elements read from them.
 int ECBackend::get_min_avail_to_read_shards(
   const hobject_t &hoid,
   const set<int> &want,
   bool for_recovery,
   bool do_redundant_reads,
-  set<pg_shard_t> *to_read)
+  set<pg_shard_t> *to_read,
+  map<int, set<int> > &elements_map)
 {
   // Make sure we don't do redundant reads for recovery
   assert(!for_recovery || !do_redundant_reads);
@@ -1504,6 +1915,7 @@ int ECBackend::get_min_avail_to_read_shards(
        ++i) {
     dout(10) << __func__ << ": checking acting " << *i << dendl;
     const pg_missing_t &missing = get_parent()->get_shard_missing(*i);
+    // Check if shard is missing in the object's placement group
     if (!missing.is_missing(hoid)) {
       assert(!have.count(i->shard));
       have.insert(i->shard);
@@ -1550,7 +1962,7 @@ int ECBackend::get_min_avail_to_read_shards(
   }
 
   set<int> need;
-  int r = ec_impl->minimum_to_decode(want, have, &need);
+  int r = ec_impl->required_to_reconstruct(want, have, &need, &elements_map);
   if (r < 0)
     return r;
 
@@ -1612,6 +2024,12 @@ void ECBackend::start_read_op(
   bool do_redundant_reads,
   bool for_recovery)
 {
+  // Still original to_read, didn't cut eements map off it yet
+  for (map<hobject_t, read_request_t>::iterator i = to_read.begin();
+      i != to_read.end(); ++i) {
+    dout(1) << "MatanLiramV6: start_read_op, elements_map of object " << i->first
+      << "is of size " << i->second.elements_map.size() << dendl;
+  }
   ceph_tid_t tid = get_parent()->get_tid();
   assert(!tid_to_read_map.count(tid));
   auto &op = tid_to_read_map.emplace(
@@ -1631,6 +2049,75 @@ void ECBackend::start_read_op(
   do_read_op(op);
 }
 
+void ECBackend::insert_trivial_chunk_to_messages(
+    pair<uint64_t, uint64_t> &chunk_off_len,
+    uint64_t &off,
+    map<pg_shard_t, ECSubRead> &messages,
+    map<hobject_t, read_request_t>::iterator i,
+    list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator &j,
+    set<pg_shard_t>::const_iterator &k,
+    const set<int> &elements,
+    const uint64_t &element_size)
+{
+  // Iterate over element ids in elements_map's kth
+  // column
+  for (set<int>::const_iterator el = elements.begin();
+      el != elements.end(); ++el) {
+    // insert the to_read of this object a tuple with offset,
+    // length, flags
+    dout(1) << __func__ << "adding " << chunk_off_len.first << "-"
+        << off << "-" << (*el * element_size) << " read of length "
+        << element_size << dendl;
+    messages[*k].to_read[i->first].push_back(boost::make_tuple(
+          chunk_off_len.first + off + (*el * element_size),
+          element_size,
+          j->get<2>()));
+    // This read will be concatenated in handle_sub_read_reply
+    // where we changed the ++j
+  }
+}
+
+void ECBackend::insert_conservative_chunk_to_messages(
+    pair<uint64_t, uint64_t> &chunk_off_len,
+    uint64_t &off,
+    map<pg_shard_t, ECSubRead> &messages,
+    map<hobject_t, read_request_t>::iterator &i,
+    list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator &j,
+    set<pg_shard_t>::const_iterator &k,
+    const set<int> &elements,
+    const uint64_t &element_size)
+{
+  // Iterate over element ids in elements_map's kth
+  // column
+  int subchunk_start = (elements.size() > 0) ? (*elements.begin())  : 0;
+  uint64_t subchunk_len = 1;
+  // We assume implicitly that elements are sorted ascendingly
+  for (set<int>::const_iterator el = elements.begin();
+      el != elements.end(); ++el) {
+    // If this read is continued, skip to the end of it
+    if (std::next(el) != elements.end()
+        && *std::next(el) == *el + 1) {
+      // skip this read
+      subchunk_len++;
+      continue;
+    }
+    // insert the to_read of this object a tuple with offset,
+    // length, flags
+    dout(1) << __func__ << "adding " << chunk_off_len.first
+        << "-" << off << "-" << (subchunk_start * element_size)
+        << " read of length " << subchunk_len*element_size << dendl;
+    messages[*k].to_read[i->first].push_back(boost::make_tuple(
+          chunk_off_len.first + off
+              + (subchunk_start*element_size),
+          subchunk_len*element_size,
+          j->get<2>()));
+    subchunk_len = 1;
+    subchunk_start = *el;
+    // This read will be concatenated in handle_sub_read_reply
+    // where we changed the ++j
+  }
+}
+
 void ECBackend::do_read_op(ReadOp &op)
 {
   int priority = op.priority;
@@ -1638,6 +2125,10 @@ void ECBackend::do_read_op(ReadOp &op)
 
   dout(10) << __func__ << ": starting read " << op << dendl;
 
+  const uint64_t chunk_size = sinfo.get_chunk_size();
+  dout(1) << "MatanLiram start_read_op chunk_size: " << chunk_size << dendl;
+  const uint64_t element_size = chunk_size / sinfo.get_row_count();
+  dout(1) << "MatanLiram start_read_op element_size: " << element_size << dendl;
   map<pg_shard_t, ECSubRead> messages;
   for (map<hobject_t, read_request_t>::iterator i = op.to_read.begin();
        i != op.to_read.end();
@@ -1653,6 +2144,11 @@ void ECBackend::do_read_op(ReadOp &op)
       op.obj_to_source[i->first].insert(*j);
       op.source_to_obj[*j].insert(i->first);
     }
+    // Get elements map from read request
+    // inserted change after changed read_request_t
+    const map<int, set<int> > &elements_map = i->second.elements_map;
+    dout(1) << __func__ << "got elements map" << dendl;
+    // Initialize by inserting full chunk reads to the complete[].returned array
     for (list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator j =
 	   i->second.to_read.begin();
 	 j != i->second.to_read.end();
@@ -1662,16 +2158,55 @@ void ECBackend::do_read_op(ReadOp &op)
       for (set<pg_shard_t>::const_iterator k = i->second.need.begin();
 	   k != i->second.need.end();
 	   ++k) {
-	messages[*k].to_read[i->first].push_back(
-	  boost::make_tuple(
-	    chunk_off_len.first,
-	    chunk_off_len.second,
-	    j->get<2>()));
+        if (elements_map.size() == 0) {
+          messages[*k].to_read[i->first].push_back(
+            boost::make_tuple(
+              chunk_off_len.first,
+              chunk_off_len.second,
+              j->get<2>()));
+        }
+        else
+        {
+          // Zero sized sharded reads are possible when we recover a parity
+          // node by reconstructing all of the data nodes
+          if (elements_map.find(k->shard.id) == elements_map.end()) {
+            // insert an empty read so that decode can extract the erasure in case
+            // of a parity recovery of the other coding node in zigzag
+            messages[*k].to_read[i->first].push_back(boost::make_tuple(
+                  chunk_off_len.first, 0, j->get<2>()));
+            continue;
+          }
+          dout(1) << __func__ << "inside non-parity shard" << dendl;
+          const set<int> &elements = elements_map.find(k->shard.id)->second;
+          dout(1) << __func__ << "elements: " << elements << "("
+            << k->shard.id << ")" << dendl;
+          // MatanLiramDoc: iterate on full chunks in this outer loop
+          for (uint64_t off=0; off < chunk_off_len.second; off += chunk_size) {
+            // Default net_type is Trivial since it doesn't put mumch overhead
+            switch (ECBackend::net_type) {
+            case ReadType::Trivial:
+              insert_trivial_chunk_to_messages(chunk_off_len, off, messages,
+                  i, j, k, elements, element_size);
+              break;
+            case ReadType::Conservative:
+              insert_conservative_chunk_to_messages(chunk_off_len, off,
+                  messages, i, j, k, elements, element_size);
+              break;
+            case ReadType::Aggressive:
+              dout(0) << __func__ << "Aggressive network can't be implemented "
+                << "(loss of information)" << dendl;
+              assert(false);
+              break;
+            }
+          }
+        }
       }
       assert(!need_attrs);
     }
   }
 
+  // Prepare messages of ECSubRead, send to messages[i]->first.osd meaning
+  // it sends the message to the shard's OSD.
   for (map<pg_shard_t, ECSubRead>::iterator i = messages.begin();
        i != messages.end();
        ++i) {
@@ -1694,9 +2229,9 @@ void ECBackend::do_read_op(ReadOp &op)
       msg->trace.keyval("shard", i->first.shard.id);
     }
     get_parent()->send_message_osd_cluster(
-      i->first.osd,
-      msg,
-      get_parent()->get_epoch());
+      i->first.osd, // peer
+      msg, // message
+      get_parent()->get_epoch()); // from epoch
   }
   dout(10) << __func__ << ": started " << op << dendl;
 }
@@ -2210,10 +2745,14 @@ struct CallClientContexts :
     const list<boost::tuple<uint64_t, uint64_t, uint32_t> > &to_read)
     : hoid(hoid), ec(ec), status(status), to_read(to_read) {}
   void finish(pair<RecoveryMessages *, ECBackend::read_result_t &> &in) override {
+    // MatanLiramV1 assertion failed
     ECBackend::read_result_t &res = in.second;
     extent_map result;
     if (res.r != 0)
       goto out;
+    // the 0 sized read of parity chunk returns a -EINVAL, we would just ignore
+    // that for the system to work properly...
+    // dout won't compile here so we move it to complete(arg) call
     assert(res.returned.size() == to_read.size());
     assert(res.r == 0);
     assert(res.errors.empty());
@@ -2273,23 +2812,29 @@ void ECBackend::objects_read_and_reconstruct(
 
   set<int> want_to_read;
   get_want_to_read_shards(&want_to_read);
-    
+
   map<hobject_t, read_request_t> for_read_op;
   for (auto &&to_read: reads) {
     set<pg_shard_t> shards;
+    dout(1) << __func__ << "flow_y: initializing elements_map" << dendl;
+    map<int, set<int> > elements_map = map<int, set<int> >();
     int r = get_min_avail_to_read_shards(
       to_read.first,
       want_to_read,
       false,
       fast_read,
-      &shards);
+      &shards,
+      elements_map);
     assert(r == 0);
+    // Possibly edit offsets here to remove redundant places.
+    // Only matters if we measure degraded reads.
 
     CallClientContexts *c = new CallClientContexts(
       to_read.first,
       this,
       &(in_progress_client_reads.back()),
       to_read.second);
+    // MatanLiramV5: send elements_map in read request
     for_read_op.insert(
       make_pair(
 	to_read.first,
@@ -2297,7 +2842,8 @@ void ECBackend::objects_read_and_reconstruct(
 	  to_read.second,
 	  shards,
 	  false,
-	  c)));
+	  c,
+          elements_map)));
   }
 
   start_read_op(

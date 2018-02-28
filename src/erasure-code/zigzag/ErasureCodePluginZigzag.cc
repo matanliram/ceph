@@ -46,7 +46,7 @@ int ErasureCodePluginZigzag::factory(const std::string &directory,
 		      ErasureCodeInterfaceRef *erasure_code,
 		      std::ostream *ss) {
     ErasureCodeZigzag *interface;
-    interface = new ErasureCodeZigzag(directory);
+    interface = new ErasureCodeZigzag();
     int r = interface->init(profile, ss);
     if (r) {
       delete interface;

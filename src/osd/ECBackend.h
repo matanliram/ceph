@@ -33,6 +33,13 @@ struct ECSubReadReply;
 
 struct RecoveryMessages;
 class ECBackend : public PGBackend {
+
+  // Define the type of reads, trivial, aggressive, conservative
+  enum class ReadType {Trivial, Aggressive, Conservative};
+  static const ReadType read_type = ReadType::Conservative; // change to Conservative
+  // Notice: net_type can't be aggressive! (loss of information)
+  static const ReadType net_type = ReadType::Trivial;
+
 public:
   RecoveryHandle *open_recovery_op() override;
 
@@ -312,7 +319,8 @@ private:
     const hobject_t &hoid,
     boost::tuple<uint64_t, uint64_t, map<pg_shard_t, bufferlist> > &to_read,
     boost::optional<map<string, bufferlist> > attrs,
-    RecoveryMessages *m);
+    RecoveryMessages *m,
+    const map<int, set<int> > &elements_map);
   void handle_recovery_push(
     const PushOp &op,
     RecoveryMessages *m);
@@ -347,6 +355,7 @@ public:
     int r;
     map<pg_shard_t, int> errors;
     boost::optional<map<string, bufferlist> > attrs;
+    map<int, set<int> > elements_map;
     list<
       boost::tuple<
 	uint64_t, uint64_t, map<pg_shard_t, bufferlist> > > returned;
@@ -357,13 +366,22 @@ public:
     const set<pg_shard_t> need;
     const bool want_attrs;
     GenContext<pair<RecoveryMessages *, read_result_t& > &> *cb;
+    const map<int, set<int> > elements_map;
     read_request_t(
       const list<boost::tuple<uint64_t, uint64_t, uint32_t> > &to_read,
       const set<pg_shard_t> &need,
       bool want_attrs,
       GenContext<pair<RecoveryMessages *, read_result_t& > &> *cb)
       : to_read(to_read), need(need), want_attrs(want_attrs),
-	cb(cb) {}
+	cb(cb), elements_map(map<int, set<int> >()) {}
+    read_request_t(
+        const list<boost::tuple<uint64_t, uint64_t, uint32_t> > &to_read,
+        const set<pg_shard_t> &need,
+        bool want_attrs,
+        GenContext<pair<RecoveryMessages *, read_result_t& > &> *cb,
+        const map<int, set<int> > &elements_map)
+      : to_read(to_read), need(need), want_attrs(want_attrs),
+      cb(cb), elements_map(elements_map) {}
   };
   friend ostream &operator<<(ostream &lhs, const read_request_t &rhs);
 
@@ -429,12 +447,66 @@ public:
     OpRequestRef op,
     bool do_redundant_reads, bool for_recovery);
 
+  void insert_trivial_chunk_to_messages(
+      pair<uint64_t, uint64_t> &chunk_off_len,
+      uint64_t &off,
+      map<pg_shard_t, ECSubRead> &messages,
+      map<hobject_t, read_request_t>::iterator i,
+      list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator &j,
+      set<pg_shard_t>::const_iterator &k,
+      const set<int> &elements,
+      const uint64_t &element_size);
+
+  void insert_conservative_chunk_to_messages(
+      pair<uint64_t, uint64_t> &chunk_off_len,
+      uint64_t &off,
+      map<pg_shard_t, ECSubRead> &messages,
+      map<hobject_t, read_request_t>::iterator &i,
+      list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator &j,
+      set<pg_shard_t>::const_iterator &k,
+      const set<int> &elements,
+      const uint64_t &element_size);
+
   void do_read_op(ReadOp &rop);
   int send_all_remaining_reads(
     const hobject_t &hoid,
     ReadOp &rop);
 
+private:
+  template <typename MapIterator>
+  bool handle_aggressive_sub_read(
+    pg_shard_t from,
+    const ECSubRead &op,
+    ECSubReadReply *reply,
+    const ZTracer::Trace &trace,
+    MapIterator &i,
+    int &r,
+    shard_id_t &shard,
+    ECUtil::HashInfoRef &hinfo);
 
+  template <typename MapIterator>
+  bool handle_trivial_sub_read(
+    pg_shard_t from,
+    const ECSubRead &op,
+    ECSubReadReply *reply,
+    const ZTracer::Trace &trace,
+    MapIterator &i,
+    int &r,
+    shard_id_t &shard,
+    ECUtil::HashInfoRef &hinfo);
+
+  template <typename MapIterator>
+  bool handle_conservative_sub_read(
+    pg_shard_t from,
+    const ECSubRead &op,
+    ECSubReadReply *reply,
+    const ZTracer::Trace &trace,
+    MapIterator &i,
+    int &r,
+    shard_id_t &shard,
+    ECUtil::HashInfoRef &hinfo);
+
+public:
   /**
    * Client writes
    *
@@ -594,7 +666,8 @@ public:
 	have.insert(i->shard);
       }
       set<int> min;
-      return ec_impl->minimum_to_decode(want, have, &min) == 0;
+      return ec_impl->required_to_reconstruct(want, have, &min,
+          static_cast<map<int, set<int> > *>(0)) == 0;
     }
   };
   IsPGRecoverablePredicate *get_is_recoverable_predicate() override {
@@ -644,7 +717,8 @@ public:
     const set<int> &want,      ///< [in] desired shards
     bool for_recovery,         ///< [in] true if we may use non-acting replicas
     bool do_redundant_reads,   ///< [in] true if we want to issue redundant reads to reduce latency
-    set<pg_shard_t> *to_read   ///< [out] shards to read
+    set<pg_shard_t> *to_read,  ///< [out] shards to read
+    map<int, set<int> > &elements_map ///< [out] elements to read in each shard
     ); ///< @return error code, 0 on success
 
   int get_remaining_shards(

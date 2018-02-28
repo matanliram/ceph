@@ -674,10 +674,12 @@ TEST(ErasureCodeLrc, encode_decode)
     available_chunks.insert(5);
     available_chunks.insert(6);
     available_chunks.insert(7);
+    set<int>expected_minimum {available_chunks};
+    expected_minimum.erase(7); // k first chunks is enough according to our fix
     set<int> minimum;
     EXPECT_EQ(0, lrc.minimum_to_decode(want_to_read, available_chunks, &minimum));
-    EXPECT_EQ(5U, minimum.size());
-    EXPECT_EQ(available_chunks, minimum);
+    EXPECT_EQ(4U, minimum.size());
+    EXPECT_EQ(expected_minimum, minimum);
 
     map<int, bufferlist> decoded;
     EXPECT_EQ(0, lrc.decode(want_to_read, encoded, &decoded));

@@ -10276,6 +10276,11 @@ void OSD::ShardedOpWQ::clear_pg_slots()
 #undef dout_prefix
 #define dout_prefix *_dout << "osd." << osd->whoami << " op_wq(" << shard_index << ") "
 
+// MatanLiramDoc:
+// process queue for shard thread_index % num_shards.
+// Wait for a new op to be added to queue and then
+// dequeue and add it to pg_for_processing. If no
+// operation was added, return.
 void OSD::ShardedOpWQ::_process(uint32_t thread_index, heartbeat_handle_d *hb)
 {
   uint32_t shard_index = thread_index % num_shards;

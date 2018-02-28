@@ -22,28 +22,6 @@
 #include "erasure-code/ErasureCode.h"
 #include "ErasureCodeConfigurationsZigzag.h"
 
-#define ERROR_LRC_ARRAY			-(MAX_ERRNO + 1)
-#define ERROR_LRC_OBJECT		-(MAX_ERRNO + 2)
-#define ERROR_LRC_INT			-(MAX_ERRNO + 3)
-#define ERROR_LRC_STR			-(MAX_ERRNO + 4)
-#define ERROR_LRC_PLUGIN		-(MAX_ERRNO + 5)
-#define ERROR_LRC_DESCRIPTION		-(MAX_ERRNO + 6)
-#define ERROR_LRC_PARSE_JSON		-(MAX_ERRNO + 7)
-#define ERROR_LRC_MAPPING		-(MAX_ERRNO + 8)
-#define ERROR_LRC_MAPPING_SIZE		-(MAX_ERRNO + 9)
-#define ERROR_LRC_FIRST_MAPPING		-(MAX_ERRNO + 10)
-#define ERROR_LRC_COUNT_CONSTRAINT	-(MAX_ERRNO + 11)
-#define ERROR_LRC_CONFIG_OPTIONS	-(MAX_ERRNO + 12)
-#define ERROR_LRC_LAYERS_COUNT		-(MAX_ERRNO + 13)
-#define ERROR_LRC_RULE_OP		-(MAX_ERRNO + 14)
-#define ERROR_LRC_RULE_TYPE		-(MAX_ERRNO + 15)
-#define ERROR_LRC_RULE_N		-(MAX_ERRNO + 16)
-#define ERROR_LRC_ALL_OR_NOTHING	-(MAX_ERRNO + 17)
-#define ERROR_LRC_GENERATED		-(MAX_ERRNO + 18)
-#define ERROR_LRC_K_M_MODULO		-(MAX_ERRNO + 19)
-#define ERROR_LRC_K_MODULO		-(MAX_ERRNO + 20)
-#define ERROR_LRC_M_MODULO		-(MAX_ERRNO + 21)
-
 class ErasureCodeZigzag : public ErasureCode {
 private:
   ZigzagConfigs zz_configs;
@@ -75,11 +53,9 @@ public:
   std::string DEFAULT_ALIGN;
   int w;
   std::string DEFAULT_W;
-  int desired_stripe;
-  std::string DEFAULT_DESIRED_STRIPE;
-  string ruleset_root;
-  string ruleset_failure_domain;
-  bool per_chunk_alignment; 
+  int stripe_unit;
+  std::string DEFAULT_STRIPE_UNIT;
+  bool per_chunk_alignment;
 
   explicit ErasureCodeZigzag() :
     pZZ_G(),
@@ -98,18 +74,12 @@ public:
     DEFAULT_ALIGN("4096"),
     w(0),
     DEFAULT_W("8"),
-    desired_stripe(0),
-    DEFAULT_DESIRED_STRIPE("67108864"),
-    ruleset_root(DEFAULT_RULESET_ROOT),
-    ruleset_failure_domain(DEFAULT_RULESET_FAILURE_DOMAIN),
+    stripe_unit(0),
+    DEFAULT_STRIPE_UNIT("1048576"),
     per_chunk_alignment(false)
     {}
 
   virtual ~ErasureCodeZigzag() {}
-
-  virtual int create_ruleset(const string &name,
-      CrushWrapper &crush,
-      ostream *ss) const override;
 
   unsigned int get_alignment() const;
 
@@ -117,7 +87,7 @@ public:
 
   int sanity_check_kvs(int k, int v, int s, ostream *ss);
 
-  int init(ErasureCodeProfile &profile, ostream *ss);
+  int init(ErasureCodeProfile &profile, ostream *ss) override;
 
   set<int> get_erasures(const set<int> &need,
       const set<int> &available) const;
@@ -144,8 +114,8 @@ public:
     return (unsigned int) std::pow(r, (k+v)/s - 1);
   }
 
-  unsigned int get_desired_stripe() const{
-    return desired_stripe;
+  unsigned int get_stripe_unit() const{
+    return stripe_unit;
   }
 
   // ###########################

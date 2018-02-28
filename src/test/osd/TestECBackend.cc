@@ -24,7 +24,7 @@ TEST(ECUtil, stripe_info_t)
   const uint64_t swidth = 4096;
   const uint64_t ssize = 4;
 
-  ECUtil::stripe_info_t s(ssize, swidth);
+  ECUtil::stripe_info_t s(ssize, swidth, 1, 1);
   ASSERT_EQ(s.get_stripe_width(), swidth);
 
   ASSERT_EQ(s.logical_to_next_chunk_offset(0), 0u);

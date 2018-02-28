@@ -11,7 +11,7 @@
  *  modify it under the terms of the GNU Lesser General Public
  *  License as published by the Free Software Foundation; either
  *  version 2.1 of the License, or (at your option) any later version.
- * 
+ *
  */
 
 #ifndef CEPH_ERASURE_CODE_H
@@ -20,7 +20,7 @@
 /*! @file ErasureCode.h
     @brief Base class for erasure code plugins implementors
 
- */ 
+ */
 
 #include "ErasureCodeInterface.h"
 
@@ -73,10 +73,10 @@ namespace ceph {
                                             std::set<int> *minimum) override;
 
     virtual int required_to_reconstruct(
-        const set<int> &chunks_want_to_read,
-        const set<int> &available_chunks,
-        set<int> *needed_chunks,
-        map<int, set<int>> *elements_map);
+        const std::set<int> &chunks_want_to_read,
+        const std::set<int> &available_chunks,
+        std::set<int> *needed_chunks,
+        std::map<int, std::set<int>> *elements_map);
 
     int encode_prepare(const bufferlist &raw,
                        std::map<int, bufferlist> &encoded) const;
@@ -92,19 +92,23 @@ namespace ceph {
                        const std::map<int, bufferlist> &chunks,
                        std::map<int, bufferlist> *decoded) override;
 
+    virtual int reconstruct_concat(
+        const std::map<int, bufferlist> &chunks,
+        bufferlist *reconstructed);
+
     virtual int reconstruct(
-        const set<int> &chunks_to_read,
-        const map<int, bufferlist> &chunks,
-        map<int, bufferlist> *reconstructed);
+        const std::set<int> &chunks_to_read,
+        const std::map<int, bufferlist> &chunks,
+        std::map<int, bufferlist> *reconstructed);
 
     int decode_chunks(const std::set<int> &want_to_read,
                               const std::map<int, bufferlist> &chunks,
                               std::map<int, bufferlist> *decoded) override;
 
     virtual int reconstruct_chunks(
-        const set<int> &want_to_read,
-        const map<int, bufferlist> &chunks,
-        map<int, bufferlist> &reconstructed);
+        const std::set<int> &want_to_read,
+        const std::map<int, bufferlist> &chunks,
+        std::map<int, bufferlist> &reconstructed);
 
     const std::vector<int> &get_chunk_mapping() const override;
 

@@ -46,5 +46,5 @@ if(WITH_EMBEDDED)
   add_library(cephd_ec_base STATIC $<TARGET_OBJECTS:erasure_code_objs>)
   set_target_properties(cephd_ec_base PROPERTIES COMPILE_DEFINITIONS BUILDING_FOR_EMBEDDED)
   merge_static_libraries(cephd_ec cephd_ec_base ${EC_ISA_EMBEDDED_LIB} cephd_ec_jerasure
-      ceph_ec_zigzag cephd_ec_lrc cephd_ec_shec)
+      cephd_ec_zigzag cephd_ec_lrc cephd_ec_shec)
 endif()

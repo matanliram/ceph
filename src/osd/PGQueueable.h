@@ -137,6 +137,10 @@ public:
   }
   void run(OSD *osd, PGRef &pg, ThreadPool::TPHandle &handle) {
     RunVis v(osd, pg, handle);
+    // MatanLiramDoc:
+    // qvariant can be an op, when run is called,
+    // the op represented by this PGQueueable is
+    // being dequeued using dequeue_op in OSD.cc
     boost::apply_visitor(v, qvariant);
   }
   unsigned get_priority() const { return priority; }

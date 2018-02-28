@@ -31,49 +31,83 @@ const uint64_t CHUNK_OVERHEAD = 16; // INFO + PADDING
 class stripe_info_t {
   const uint64_t stripe_width;
   const uint64_t chunk_size;
+  // MatanLiramV4
+  const uint64_t num_rows;
+  const uint64_t k;
+  const uint64_t s;
 public:
-  stripe_info_t(uint64_t stripe_size, uint64_t stripe_width)
+  // MatanLiramV4: changed the constructor entirely
+  stripe_info_t(
+      uint64_t stripe_size,
+      uint64_t stripe_width,
+      uint64_t num_rows,
+      uint64_t s)
     : stripe_width(stripe_width),
-      chunk_size(stripe_width / stripe_size) {
+      chunk_size(stripe_width / stripe_size),
+      num_rows(num_rows),
+      k(stripe_size),
+      s(s) {
     assert(stripe_width % stripe_size == 0);
   }
   bool logical_offset_is_stripe_aligned(uint64_t logical) const {
     return (logical % stripe_width) == 0;
   }
+  // number of bytes in an object
   uint64_t get_stripe_width() const {
     return stripe_width;
   }
+  // number of bytes in a single chunk
   uint64_t get_chunk_size() const {
     return chunk_size;
   }
+  // MatanLiramV4: get_data_chunk_count equivalent
+  uint64_t get_k() const {
+    return k;
+  }
+  // MatanLiramV4
+  uint64_t get_s() const {
+    return s;
+  }
+  // MatanLiramV4
+  uint64_t get_row_count() const {
+    return num_rows;
+  }
+  // local in one OSD
   uint64_t logical_to_prev_chunk_offset(uint64_t offset) const {
     return (offset / stripe_width) * chunk_size;
   }
+  // local in one OSD
   uint64_t logical_to_next_chunk_offset(uint64_t offset) const {
     return ((offset + stripe_width - 1)/ stripe_width) * chunk_size;
   }
+  // global in all OSDs
   uint64_t logical_to_prev_stripe_offset(uint64_t offset) const {
     return offset - (offset % stripe_width);
   }
+  // global in all OSDs
   uint64_t logical_to_next_stripe_offset(uint64_t offset) const {
     return ((offset % stripe_width) ?
       (offset - (offset % stripe_width) + stripe_width) :
       offset);
   }
+  // global to local
   uint64_t aligned_logical_offset_to_chunk_offset(uint64_t offset) const {
     assert(offset % stripe_width == 0);
     return (offset / stripe_width) * chunk_size;
   }
+  // local to global
   uint64_t aligned_chunk_offset_to_logical_offset(uint64_t offset) const {
     assert(offset % chunk_size == 0);
     return (offset / chunk_size) * stripe_width;
   }
+  // turn <offset, length> pair from global to local
   std::pair<uint64_t, uint64_t> aligned_offset_len_to_chunk(
     std::pair<uint64_t, uint64_t> in) const {
     return std::make_pair(
       aligned_logical_offset_to_chunk_offset(in.first),
       aligned_logical_offset_to_chunk_offset(in.second));
   }
+  // align <offset, length> to nearest stripes
   std::pair<uint64_t, uint64_t> offset_len_to_stripe_bounds(
     std::pair<uint64_t, uint64_t> in) const {
     uint64_t off = logical_to_prev_stripe_offset(in.first);
