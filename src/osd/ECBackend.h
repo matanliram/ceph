@@ -36,7 +36,7 @@ class ECBackend : public PGBackend {
 
   // Define the type of reads, trivial, aggressive, conservative
   enum class ReadType {Trivial, Aggressive, Conservative};
-  static const ReadType read_type = ReadType::Conservative; // change to Conservative
+  ReadType read_type; // change to Conservative
   // Notice: net_type can't be aggressive! (loss of information)
   static const ReadType net_type = ReadType::Trivial;
 
