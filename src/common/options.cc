@@ -1720,7 +1720,8 @@ std::vector<Option> get_global_options() {
 
     Option("osd_pool_recovery_read_type", Option::TYPE_STR, Option::LEVEL_ADVANCED)
     .set_default("conservative")
-    .set_description("The read type may be trivial, conservative or aggressive."),
+    .set_description("The read type may be trivial, conservative or aggressive.")
+    .set_safe(),
 
     Option("osd_pool_elements_representation_bits", Option::TYPE_UINT, Option::LEVEL_ADVANCED)
     .set_default(8)
