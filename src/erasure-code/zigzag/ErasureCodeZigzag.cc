@@ -176,7 +176,7 @@ unsigned ErasureCodeZigzag::get_chunk_size(unsigned object_size) const
   unsigned chunk_size = (object_size + data_chunk_count - 1) / data_chunk_count;
   unsigned modulo = chunk_size % alignment;
   dout(20) << "get_chunk_size: chunk_size " << chunk_size
-    << " must be modulo " << alignment << dendl;
+    << " must be modulu " << alignment << dendl;
   if (modulo) {
     dout(10) << "get_chunk_size: original chunk: " << chunk_size
       << " padded to: " << chunk_size + alignment - modulo << dendl;
@@ -205,8 +205,8 @@ int ErasureCodeZigzag::required_to_reconstruct(const set<int> &chunks_to_read,
     set<int> *needed_chunks,
     map<int, set<int> > *elements_map)
 {
-  dout(1) << "required_to_reconstruct" << dendl;
-  dout(1) << "elements_map of size " << elements_map->size() << dendl;
+  // dout(1) << "required_to_reconstruct" << dendl;
+  // dout(1) << "elements_map of size " << elements_map->size() << dendl;
   if (!needed_chunks) {
     return -EINVAL;
   }
@@ -528,11 +528,9 @@ int ErasureCodeZigzag::encode_chunks(const set<int> &want_to_encode,
   }
 
   //encode_chunks_parity(chunks, chunk_size);
-  dout(1) << __func__ << ": Before do_parity" << dendl;
   do_parity(k, chunks, chunks[k], chunk_size);
 
   for (unsigned index = 0; index < zigzag_chunk_count; index++) {
-    dout(1) << __func__ << ": Encoding zigzag chunk " << index << dendl;
     encode_chunks_zigzag(chunks, chunk_size, index);
   }
 
@@ -545,7 +543,6 @@ void ErasureCodeZigzag::do_parity(int k, char *data_ptrs[], char *parity_ptr, in
 
   memcpy(parity_ptr, data_ptrs[0], size);
   for (i=1; i<k; ++i) {
-    dout(1) << __func__ << ": galois region " << i << dendl;
     galois_region_xor(data_ptrs[i], parity_ptr, size);
   }
 }
@@ -576,8 +573,6 @@ void ErasureCodeZigzag::encode_chunks_zigzag(char *chunks[],
 
   for (unsigned int chunk_index = 0; chunk_index < data_chunk_count; chunk_index++) {
     for (unsigned int row_index = 0; row_index < row_count; row_index++) {
-      dout(1) << __func__ << ": Encoding chunk " << chunk_index << " row "
-              << row_index << dendl;
       char *dst = chunks[get_data_chunk_count() + 1 + zz_chunk] + \
               (row_index * row_of_chunk_size);
       unsigned int zigzag_index = pZZ_G->zz_encode[zz_chunk][row_index][chunk_index];

@@ -44,8 +44,7 @@ static ostream& _prefix(std::ostream* _dout)
 int ErasureCodePluginZigzag::factory(const std::string &directory,
 		      ErasureCodeProfile &profile,
 		      ErasureCodeInterfaceRef *erasure_code,
-		      std::ostream *ss)
-{
+		      std::ostream *ss) {
     ErasureCodeZigzag *interface;
     interface = new ErasureCodeZigzag();
     int r = interface->init(profile, ss);
