@@ -201,6 +201,22 @@ ECBackend::ECBackend(
     ec_impl(ec_impl),
     sinfo(ec_impl->get_data_chunk_count(), stripe_width, ec_impl->get_row_count(),
         ec_impl->get_zigzag_duplication()) {
+  if (cct->_conf->get_val<std::string>("osd_pool_recovery_read_type") == "trivial")
+  {
+    read_type = ReadType::Trivial;
+  }
+  else if (cct->_conf->get_val<std::string>("osd_pool_recovery_read_type") == "aggressive")
+  {
+    read_type = ReadType::Aggressive;
+  }
+  else if (cct->_conf->get_val<std::string>("osd_pool_recovery_read_type") == "conservative")
+  {
+    read_type = ReadType::Conservative;
+  }
+  else
+  {
+    read_type = ReadType::Conservative;
+  }
   assert((ec_impl->get_data_chunk_count() *
 	  ec_impl->get_chunk_size(stripe_width)) == stripe_width);
 }
@@ -1185,9 +1201,11 @@ bool ECBackend::handle_trivial_sub_read(
         h << bl;
         if (h.digest() != hinfo->get_chunk_hash(shard)) {
           get_parent()->clog_error() << "Bad hash for " << i->first << " digest 0x"
-                                     << hex << h.digest() << " expected 0x" << hinfo->get_chunk_hash(shard) << dec;
+                                     << hex << h.digest() << " expected 0x"
+                                     << hinfo->get_chunk_hash(shard) << dec;
           dout(5) << __func__ << ": Bad hash for " << i->first << " digest 0x"
-                  << hex << h.digest() << " expected 0x" << hinfo->get_chunk_hash(shard) << dec << dendl;
+                  << hex << h.digest() << " expected 0x" << hinfo->get_chunk_hash(shard)
+                  << dec << dendl;
           r = -EIO;
           return true;
         }
@@ -1326,7 +1344,7 @@ void ECBackend::handle_sub_read(
     // conservative in the buffer from start_read_op(), take the first and last
     // positions and read between them. Then naming the first position firstoff,
     // in order to read x,len we copy x-firstoff,len from the given buffer.
-    switch (ECBackend::read_type)
+    switch (read_type)
     {
     case ReadType::Aggressive:
       is_error = handle_aggressive_sub_read(from, op, reply, trace, i, r, shard, hinfo);
