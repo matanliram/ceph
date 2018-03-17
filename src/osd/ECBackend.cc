@@ -201,15 +201,15 @@ ECBackend::ECBackend(
     ec_impl(ec_impl),
     sinfo(ec_impl->get_data_chunk_count(), stripe_width, ec_impl->get_row_count(),
         ec_impl->get_zigzag_duplication()) {
-  if (cct->_conf->get_val<std::string>("osd_pool_recovery_read_type") == "trivial")
+  if (cct->_conf->osd_pool_recovery_read_type == "trivial")
   {
     read_type = ReadType::Trivial;
   }
-  else if (cct->_conf->get_val<std::string>("osd_pool_recovery_read_type") == "aggressive")
+  else if (cct->_conf->osd_pool_recovery_read_type == "aggressive")
   {
     read_type = ReadType::Aggressive;
   }
-  else if (cct->_conf->get_val<std::string>("osd_pool_recovery_read_type") == "conservative")
+  else if (cct->_conf->osd_pool_recovery_read_type == "conservative")
   {
     read_type = ReadType::Conservative;
   }
