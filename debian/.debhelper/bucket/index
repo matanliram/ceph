@@ -1,0 +1,4 @@
+af86fe6ceb896c050ede75d6fc9f281d90a5af22886728162dbfcadd347d3bba src/boost/tools/build/src/engine/boehm_gc/config.guess
+9be3de218833c076786b919dc34aab691611f4cd73316e7705f2673e2c41921b src/erasure-code/jerasure/jerasure/config.guess
+0f43e9033615d86ff1d45b67994386ff1fa8631fb67efbb6a0a1ca62a05cd89b src/boost/tools/build/src/engine/boehm_gc/config.sub
+e308ae7f7f524bd790f8d4457c7c0a30f8403ffff4dd0b7d4388daca24275db4 src/erasure-code/jerasure/jerasure/config.sub
