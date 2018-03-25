@@ -1718,6 +1718,14 @@ std::vector<Option> get_global_options() {
     .set_default("plugin=jerasure technique=reed_sol_van k=2 m=1")
     .set_description(""),
 
+    Option("osd_pool_recovery_read_type", Option::TYPE_STR, Option::LEVEL_ADVANCED)
+      .set_default("conservative")
+      .set_enum_allowed( { "trivial", "conservative", "aggressive" } )
+      .set_description(
+          "The way that elements are aligned may be trivial, conservative or aggressive.")
+      .add_service("osd")
+      .set_safe(),
+
     Option("osd_erasure_code_plugins", Option::TYPE_STR, Option::LEVEL_ADVANCED)
     .set_default("jerasure lrc"
   #ifdef HAVE_BETTER_YASM_ELF64

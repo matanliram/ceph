@@ -24,12 +24,13 @@
 #include "osd/osd_types.h"
 #include "include/stringify.h"
 #include "erasure-code/ErasureCodePlugin.h"
+#include "ErasureCodeZigzag.h"
 extern "C" {
-#include "jerasure.h"
 #include "galois.h"
+#include "jerasure.h"
+#include <gf_complete.h>
 }
 
-#include "ErasureCodeZigzag.h"
 
 // re-include our assert to clobber boost's
 
@@ -43,6 +44,8 @@ extern "C" {
 #define dout_subsys ceph_subsys_osd
 #undef dout_prefix
 #define dout_prefix _prefix(_dout)
+
+static gf_t gf_w;
 
 static ostream& _prefix(std::ostream* _dout)
 {
@@ -206,7 +209,10 @@ int ErasureCodeZigzag::required_to_reconstruct(const set<int> &chunks_to_read,
     map<int, set<int> > *elements_map)
 {
   dout(1) << "required_to_reconstruct" << dendl;
-  dout(1) << "elements_map of size " << elements_map->size() << dendl;
+  if (elements_map != NULL)
+  {
+    dout(1) << "elements_map of size " << elements_map->size() << dendl;
+  }
   if (!needed_chunks) {
     return -EINVAL;
   }
@@ -381,6 +387,8 @@ int ErasureCodeZigzag::init_zigzag()//unsigned int object_size)
   // won't print anyways..
   //dout(1) << "init_zigzag" << dendl;
   unsigned int data_chunk_count = get_data_chunk_count();
+  dout(1) << __func__ << " initializing gf_w with w=" << get_field() << dendl;
+  gf_init_easy(&gf_w, get_field());
 
   pZZ_G = zz_configs.configs[k][r][v][s][perm];
 
@@ -465,7 +473,9 @@ int ErasureCodeZigzag::encode_prepare(const bufferlist &raw,
   // add r junk bufferlists for parity
   for (unsigned int i = k; i < k + r; i++) {
     bufferlist &chunk = encoded[chunk_index(i)];
+    chunk.clear();
     chunk.push_back(buffer::create_aligned(blocksize, SIMD_ALIGN));
+    dout(1) << __func__ << " buffer " << i << " addr " << chunk.c_str() << dendl;
   }
 
   return 0;
@@ -505,7 +515,7 @@ int ErasureCodeZigzag::encode(const set<int> &want_to_encode,
 int ErasureCodeZigzag::encode_chunks(const set<int> &want_to_encode,
     map<int, bufferlist> *encoded)
 {
-  //dout(1) << "encode_chunks" << dendl;
+  dout(1) << "encode_chunks" << dendl;
   unsigned k = get_data_chunk_count();
   unsigned r = get_coding_chunk_count();
   // actually will be sinfo.get_chunk_size() but this way is good in case
@@ -514,25 +524,19 @@ int ErasureCodeZigzag::encode_chunks(const set<int> &want_to_encode,
   // there's a small assumption that chunk_index doesn't map parity chunks to
   // position 0 which is true by chunk_index() definition
   unsigned chunk_size = (*encoded)[0].length();
-  dout(1) << "MatanLiramV8: chunk size: " << chunk_size << dendl;
   unsigned zigzag_chunk_count = r - 1;
-  char *chunks[k + r];
+  char *chunks[k + r] = {0};
 
   for (unsigned index = 0; index < (unsigned) (k + r); index++) {
     // chunks array is sorted D..DP..P (data and then parity chunks)
-    dout(1) << "MatanLiramV8: bl size of chunk " << index << " is " << (*encoded)[index].length()
-      << dendl;
     // as defined in prepare_encode, encoded is ordered by chunk_index(shard_id)
     // and therefore chunks has the same order
     chunks[index] = (*encoded)[index].c_str();
   }
 
-  //encode_chunks_parity(chunks, chunk_size);
-  dout(1) << __func__ << ": Before do_parity" << dendl;
   do_parity(k, chunks, chunks[k], chunk_size);
 
   for (unsigned index = 0; index < zigzag_chunk_count; index++) {
-    dout(1) << __func__ << ": Encoding zigzag chunk " << index << dendl;
     encode_chunks_zigzag(chunks, chunk_size, index);
   }
 
@@ -545,22 +549,26 @@ void ErasureCodeZigzag::do_parity(int k, char *data_ptrs[], char *parity_ptr, in
 
   memcpy(parity_ptr, data_ptrs[0], size);
   for (i=1; i<k; ++i) {
-    dout(1) << __func__ << ": galois region " << i << dendl;
     galois_region_xor(data_ptrs[i], parity_ptr, size);
   }
 }
 
-void ErasureCodeZigzag::galois_multiply(char *region, int multby, int nbytes, char *r2, int add)
+void ErasureCodeZigzag::galois_multiply(gf_t *gf,
+                                        char *region,
+                                        unsigned long multby,
+                                        int nbytes,
+                                        char *r2,
+                                        int add)
 {
     switch (get_field()) {
     case 8:
-        galois_w08_region_multiply(region, multby, nbytes, r2, add);
+        gf->multiply_region.w32(gf, region, r2, multby, nbytes, add);
         break;
     case 16:
-        galois_w16_region_multiply(region, multby, nbytes, r2, add);
+        gf->multiply_region.w32(gf, region, r2, multby, nbytes, add);
         break;
     case 32:
-        galois_w32_region_multiply(region, multby, nbytes, r2, add);
+        gf->multiply_region.w32(gf, region, r2, multby, nbytes, add);
         break;
     }
 }
@@ -571,24 +579,22 @@ void ErasureCodeZigzag::encode_chunks_zigzag(char *chunks[],
 {
   unsigned int data_chunk_count = get_data_chunk_count();
   unsigned int row_count = get_row_count();
-  unsigned int row_of_chunk_size = chunk_size / row_count;
-  vector<int> init_rows(row_count);
+  unsigned int element_size = chunk_size / row_count;
+  vector<int> init_rows(row_count, 0);
 
   for (unsigned int chunk_index = 0; chunk_index < data_chunk_count; chunk_index++) {
     for (unsigned int row_index = 0; row_index < row_count; row_index++) {
-      dout(1) << __func__ << ": Encoding chunk " << chunk_index << " row "
-              << row_index << dendl;
       char *dst = chunks[get_data_chunk_count() + 1 + zz_chunk] + \
-              (row_index * row_of_chunk_size);
+              (row_index * element_size);
       unsigned int zigzag_index = pZZ_G->zz_encode[zz_chunk][row_index][chunk_index];
       assert(zigzag_index < row_count);
-      char *src = chunks[chunk_index] + (zigzag_index * row_of_chunk_size);
+      char *src = chunks[chunk_index] + (zigzag_index * element_size);
       if(zero_elements[chunk_index][zigzag_index] == true) {
         continue;
       }
-      galois_multiply(src, pZZ_G->zz_coeff[zz_chunk][row_index][chunk_index],
-          row_of_chunk_size, dst, init_rows[row_index]);
-      init_rows[row_index] = 1;
+      galois_multiply(&gf_w, src, pZZ_G->zz_coeff[zz_chunk][row_index][chunk_index],
+                      element_size, dst, init_rows[row_index]);
+      init_rows[row_index] = 1; // from now on product will be xored to dst
     }
   }
 }
@@ -598,7 +604,7 @@ int ErasureCodeZigzag::decode_chunks(const set<int> &want_to_read,
     const map<int, bufferlist> &chunks,
     map<int, bufferlist> *decoded)
 {
-  assert("ErasureCodeZigzag::decode_chunks not implemented" == 0);
+  return reconstruct_chunks(want_to_read, chunks, *decoded);
 }
 
 int ErasureCodeZigzag::reconstruct_concat(const map<int, bufferlist> &chunks,
@@ -742,7 +748,9 @@ int ErasureCodeZigzag::reconstruct_chunks_aux(unsigned failed_chunk,
   dout(1) << "MatanLiramV8: data chunk recovery here" << dendl;
   reconstruct_chunks_parity(failed_chunk, read_chunks, chunks, chunk_size);
 
+  dout(1) << __func__ << " reconstructing zigzag chunks" << dendl;
   for (unsigned index = 0; index < zigzag_chunk_count; index++) {
+    dout(1) << __func__ << " reconstucting " << index << "th zigzag chunk" << dendl;
     reconstruct_chunks_zigzag(failed_chunk, read_chunks, chunks, chunk_size, index);
   }
 
@@ -757,35 +765,42 @@ int ErasureCodeZigzag::reconstruct_chunks_parity(unsigned failed_chunk,
 {
   unsigned data_chunk_count = get_data_chunk_count();
   unsigned row_count = get_row_count();
-  unsigned row_parity_count = row_count / (get_chunk_count() - \
-      get_data_chunk_count());
-  unsigned row_of_chunk_size = chunk_size / row_count;
+  unsigned row_parity_count = row_count / (get_chunk_count() - get_data_chunk_count());
+  unsigned element_size = chunk_size / row_count;
+  dout(1) << __func__ << " data_chunk_count: " << data_chunk_count << " row_count: "
+          << row_count << " row_parity_count: " << row_parity_count << " element_size: "
+          << element_size << dendl;
 
   for (unsigned index = 0; index < row_parity_count; index++) {
+    dout(1) << __func__ << " in row parity " << index << dendl;
     unsigned row_index = pZZ_G->parity_rows[failed_chunk][index];
-    char *src = chunks[get_data_chunk_count()] + (row_index * row_of_chunk_size);
-    char *dst = chunks[failed_chunk] + (row_index * row_of_chunk_size);
+    char *src = chunks[get_data_chunk_count()] + (row_index * element_size);
+    char *dst = chunks[failed_chunk] + (row_index * element_size);
     if(zero_elements[failed_chunk][row_index] == true) {
       continue;
     }
-    memcpy(dst, src, row_of_chunk_size);
+    memcpy(dst, src, element_size);
   }
 
   for (unsigned chunk_idx = 0; chunk_idx < data_chunk_count; chunk_idx++) {
     if (chunk_idx == failed_chunk) {
       continue;
     }
+    dout(1) << __func__ << " in chunk index " << chunk_idx << dendl;
 
     for (unsigned index = 0; index < row_parity_count; index++) {
+      dout(1) << __func__ << " in row_parity_count id " << index << dendl;
       unsigned row_index = pZZ_G->parity_rows[failed_chunk][index];
-      char *src = chunks[chunk_idx] + (row_index * row_of_chunk_size);
-      char *dst = chunks[failed_chunk] + (row_index * row_of_chunk_size);
+      char *src = chunks[chunk_idx] + (row_index * element_size);
+      char *dst = chunks[failed_chunk] + (row_index * element_size);
 
       if(zero_elements[failed_chunk][row_index] == true || zero_elements[chunk_idx][row_index]) {
         continue;
       }
 
-      galois_region_xor(src, dst, row_of_chunk_size);
+      dout(1) << __func__ << " xoring " << (void *)src << " to " << (void *)dst
+              << " of size " << element_size << dendl;
+      galois_region_xor(src, dst, element_size);
     }
   }
 
@@ -802,7 +817,7 @@ int ErasureCodeZigzag::reconstruct_chunks_zigzag(unsigned failed_chunk,
   unsigned data_chunk_count = get_data_chunk_count();
   unsigned row_count = get_row_count();
   unsigned row_parity_count = row_count / (get_chunk_count() - get_data_chunk_count());
-  unsigned row_of_chunk_size = chunk_size / row_count;
+  unsigned element_size = chunk_size / row_count;
   unsigned zigzag_chunk_index = get_data_chunk_count() + 1 + zz_chunk;
 
   for (unsigned index = 0; index < row_parity_count; index++) {
@@ -811,14 +826,14 @@ int ErasureCodeZigzag::reconstruct_chunks_zigzag(unsigned failed_chunk,
     /* index of row of zigzag chunk we need for reconstruct */
     unsigned zigzag_row_index = pZZ_G->zz_perms[zz_chunk][failed_chunk][row_index];
 
-    char *src = chunks[zigzag_chunk_index] + (zigzag_row_index * row_of_chunk_size);
-    char *dst = chunks[failed_chunk] + (row_index * row_of_chunk_size);
+    char *src = chunks[zigzag_chunk_index] + (zigzag_row_index * element_size);
+    char *dst = chunks[failed_chunk] + (row_index * element_size);
 
     if(zero_elements[failed_chunk][row_index] == true) {
       continue;
     }
 
-    memcpy(dst, src, row_of_chunk_size);
+    memcpy(dst, src, element_size);
   }
 
   for (unsigned chunk_idx = 0; chunk_idx < data_chunk_count; chunk_idx++) {
@@ -834,32 +849,32 @@ int ErasureCodeZigzag::reconstruct_chunks_zigzag(unsigned failed_chunk,
       /* the zigzag row of the chunk we want to reconstruct */
       unsigned src_zigzag_index = pZZ_G->zz_encode[zz_chunk][zigzag_row_index][chunk_idx];
       /* the source row chunk of chunk_idx that is in zigzag_index */
-      char *src = chunks[chunk_idx] + (src_zigzag_index * row_of_chunk_size);
+      char *src = chunks[chunk_idx] + (src_zigzag_index * element_size);
       /* the destination row chunk of the chunk we want to reconstruct */
-      char *dst = chunks[failed_chunk] + (row_index * row_of_chunk_size);
+      char *dst = chunks[failed_chunk] + (row_index * element_size);
 
       if (zero_elements[chunk_idx][src_zigzag_index] == true
           || zero_elements[failed_chunk][row_index] == true) {
         continue;
       }
 
-      galois_multiply(src, pZZ_G->zz_coeff[zz_chunk][zigzag_row_index][chunk_idx],
-          row_of_chunk_size, dst, 1);
+      galois_multiply(&gf_w, src, pZZ_G->zz_coeff[zz_chunk][zigzag_row_index][chunk_idx],
+          element_size, dst, 1);
     }
   }
 
   for (unsigned index = 0; index < row_parity_count; index++) {
     unsigned row_index = pZZ_G->zigzag_rows[zz_chunk][failed_chunk][index];
     unsigned zigzag_index = pZZ_G->zz_perms[zz_chunk][failed_chunk][row_index];
-    char *src = chunks[failed_chunk] + (row_index * row_of_chunk_size);
+    char *src = chunks[failed_chunk] + (row_index * element_size);
 
     if(zero_elements[failed_chunk][row_index] == true) {
       continue;
     }
 
-    galois_multiply(src,
+    galois_multiply(&gf_w, src,
         zz_transposes[pZZ_G->zz_coeff[zz_chunk][zigzag_index][failed_chunk]],
-        row_of_chunk_size,
+        element_size,
         src,
         0);
   }

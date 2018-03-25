@@ -52,6 +52,9 @@
         <pathelement location="${env.CEPHFS_JAR}"/>
         <pathelement location="libcephfs.jar"/>
         <pathelement location="libcephfs-test.jar"/>
+        <fileset dir="${junit.dir}">
+            <include name="**/junit.jar" />
+        </fileset>
       </classpath>
       <formatter type="plain"/>
       <test name="com.ceph.fs.CephAllTests" haltonerror="true" />
@@ -66,6 +69,9 @@
         <pathelement location="${env.CEPHFS_JAR}"/>
         <pathelement location="libcephfs.jar"/>
         <pathelement location="libcephfs-test.jar"/>
+        <fileset dir="${junit.dir}">
+            <include name="**/junit.jar" />
+        </fileset>
       </classpath>
       <formatter type="plain"/>
       <test name="com.ceph.fs.CephAllTests" haltonerror="true" />

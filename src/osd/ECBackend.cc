@@ -201,20 +201,23 @@ ECBackend::ECBackend(
     ec_impl(ec_impl),
     sinfo(ec_impl->get_data_chunk_count(), stripe_width, ec_impl->get_row_count(),
         ec_impl->get_zigzag_duplication()) {
-  if (cct->_conf->get_val<std::string>("osd_pool_recovery_read_type") == "trivial")
+  if (cct->_conf->get_val<std::string>("osd_pool_recovery_read_type").compare("trivial") == 0)
   {
     read_type = ReadType::Trivial;
   }
-  else if (cct->_conf->get_val<std::string>("osd_pool_recovery_read_type") == "aggressive")
+  else if (cct->_conf->get_val<std::string>("osd_pool_recovery_read_type").compare(
+        "aggressive") == 0)
   {
     read_type = ReadType::Aggressive;
   }
-  else if (cct->_conf->get_val<std::string>("osd_pool_recovery_read_type") == "conservative")
+  else if (cct->_conf->get_val<std::string>("osd_pool_recovery_read_type").compare(
+        "conservative") == 0)
   {
     read_type = ReadType::Conservative;
   }
   else
   {
+    dout(5) << __func__ << " read type: unknown" << dendl;
     read_type = ReadType::Conservative;
   }
   assert((ec_impl->get_data_chunk_count() *
@@ -454,12 +457,8 @@ void ECBackend::handle_recovery_read_complete(
     if (elements_map.size() == 0) {
       from[i->first.shard].claim(i->second);
     } else if (elements_map.find(i->first.shard) == elements_map.end()) {
-      dout(1) << __func__ << "got the buffer of parity shard " << i->first.shard
-          << " of size " << i->second << ", appending zeros" << dendl;
       from[i->first.shard].append_zero(sinfo.get_chunk_size());
     } else { // elements_map is relevant to this chunk
-      dout(1) << __func__ << "length of bufferlist received (" << 
-          i->first.shard << ") is " << i->second.length() << dendl;
       // risky change here
       from[i->first.shard].clear();
       assert(elements_map.find(i->first.shard) != elements_map.end());
@@ -470,7 +469,7 @@ void ECBackend::handle_recovery_read_complete(
           ++j, ++count) {
         // number of zero element blocks needed to add to decode
         const int zero_size = *j - prev_element;
-        dout(1) << __func__ << "zero size: " << zero_size << dendl;
+        dout(20) << __func__ << "zero size: " << zero_size << dendl;
         // we don't nullify the element itself, therefore the +1 is important
         prev_element = *j+1;
         // append zeros if needed:
@@ -479,7 +478,7 @@ void ECBackend::handle_recovery_read_complete(
         }
         bufferlist subbuf;
         subbuf.substr_of(i->second, element_size * count, element_size);
-        dout(1) << __func__ << "subbuf size: " << subbuf.length() << dendl;
+        dout(20) << __func__ << "subbuf size: " << subbuf.length() << dendl;
         from[i->first.shard].claim_append(subbuf); // append 1 more element
         // TODO: optimize to append more than 1 element if possible.
       }
@@ -1230,28 +1229,32 @@ bool ECBackend::handle_conservative_sub_read(
   if (i->second.begin() == i->second.end()) {
     return false;
   }
+
   // Iterate over element ids in elements_map's kth column
   // otherwise not yet implemented
   assert(ECBackend::net_type == ReadType::Trivial);
   uint64_t element_size = sinfo.get_chunk_size() / sinfo.get_row_count();
   uint64_t subchunk_start = i->second.front().template get<0>();
+  // should start from element_size:
   uint64_t subchunk_len = i->second.front().template get<1>();
-  dout(1) << "MatanLiramV10: element_size: " << element_size << " subchunk_start: "
-    << subchunk_start << " subchunk_len: " << subchunk_len << dendl;
+  dout(20) << "MatanLiramV10: element_size: " << element_size << " subchunk_start: "
+          << subchunk_start << " subchunk_len: " << subchunk_len << dendl;
   // We assume implicitly that elements are sorted ascendingly
   for (auto j = i->second.begin(); j != i->second.end(); ++j) {
     bufferlist bl;
+    dout(20) << __func__ << ": Trivial shard offset " << j->template get<0>()
+             << " of size " << j->template get<1>() << dendl;
     // If this read is sequential, skip to the last chunk in the continuous part
     if (std::next(j) != i->second.end()
-        && std::next(j)->template get<0>() == \
-          j->template get<0>() + j->template get<1>()) {
+        && std::next(j)->template get<0>() == j->template get<0>() + j->template get<1>()) {
       // skip this read
       assert(j->template get<1>() == element_size); // assert trivial network
       subchunk_len += j->template get<1>();
       continue;
     }
-    if (j->template get<1>() > 0) { // or subchunk_len > 0 if there's no extreme case
-      dout(1) << "MatanLiramV10: conservatively read: [" << subchunk_start << ","
+    if (subchunk_len > 0) {
+      assert(j->template get<1>() > 0); // No reason that last chunk in series will be empty
+      dout(20) << "MatanLiramV10: conservatively read: [" << subchunk_start << ","
         << subchunk_len << "]" << dendl;
       r = store->read(
           ch, // ObjectStore::CollectionHandle
@@ -1285,7 +1288,6 @@ bool ECBackend::handle_conservative_sub_read(
             );
       }
     }
-    
     // MatanLiramV6: gives -EIO, check why hash is bad after our changes...
     // This shows that we still need deep scrub because large enough files
     // are read in sections, so the digest check here won't be done here.
@@ -1309,7 +1311,7 @@ bool ECBackend::handle_conservative_sub_read(
     }
 
     if (std::next(j) != i->second.end()) {
-      subchunk_len = element_size;
+      subchunk_len = std::next(j)->template get<1>();
       subchunk_start = std::next(j)->template get<0>();
     }
   } // endof to_read iteration
@@ -1340,6 +1342,7 @@ void ECBackend::handle_sub_read(
 	goto error;
       }
     }
+
     // Aggressive reads are implemented as follows: we get
     // conservative in the buffer from start_read_op(), take the first and last
     // positions and read between them. Then naming the first position firstoff,
@@ -1357,7 +1360,7 @@ void ECBackend::handle_sub_read(
           hinfo);
       break;
     default:
-      dout(1) << __func__ << "Invalid read type." << dendl;
+      dout(5) << __func__ << "Invalid read type." << dendl;
       goto error;
       break;
     }
@@ -1447,7 +1450,7 @@ void ECBackend::handle_sub_read_reply(
   uint64_t chunk_size = sinfo.get_chunk_size();
   // For renewing asserts
   uint64_t element_size = chunk_size / sinfo.get_row_count();
-  dout(1) << "MatanLiramV5: chunk size in handle_sub_read_reply is: " <<
+  dout(20) << "MatanLiramV5: chunk size in handle_sub_read_reply is: " <<
     chunk_size << dendl;
   ReadOp &rop = iter->second;
   // buffers_read have start_offset, contents buffer pair, constructed
@@ -1455,7 +1458,7 @@ void ECBackend::handle_sub_read_reply(
   for (auto i = op.buffers_read.begin();
        i != op.buffers_read.end();
        ++i) {
-    dout(1) << __func__ << "buffers_read list is of size: " << i->second.size()
+    dout(20) << __func__ << "buffers_read list is of size: " << i->second.size()
       << dendl;
     // If attribute error we better not have sent a buffer
     assert(!op.errors.count(i->first));
@@ -1470,11 +1473,11 @@ void ECBackend::handle_sub_read_reply(
     list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator req_iter =
       rop.to_read.find(i->first)->second.to_read.begin();
     // Pass elements_map to read_result_t:
-    dout(1) << __func__ << "complete has " << rop.complete.size()
+    dout(20) << __func__ << "complete has " << rop.complete.size()
       << "elements." << dendl;
     const map<int, set<int> > &elements_map = rop.to_read.find(
         i->first)->second.elements_map;
-    dout(1) << __func__ << "elements_map size is: " << elements_map.size()
+    dout(20) << __func__ << "elements_map size is: " << elements_map.size()
       << dendl;
 
     // Notice tht rop.complete needs the read_result_t to be updated once,
@@ -1492,7 +1495,7 @@ void ECBackend::handle_sub_read_reply(
       // but we also want to make sure the key was not initialized before
       // because it doesn't make sense that an hobject_t key will have 2 different
       // read_result_t values.
-      dout(1) << "MatanLiramV6: Initializing elements_map in read_result_t"
+      dout(20) << "MatanLiramV6: Initializing elements_map in read_result_t"
         << dendl;
       // apparently insert cannot override elements, we have no elements_map in
       // result... -.-
@@ -1512,17 +1515,6 @@ void ECBackend::handle_sub_read_reply(
     // We can concatenate all j reads of the same chunk into the same bufferlist
     // in riter, and then add zeroes in decode (or use a special decode).
     // riter is initialized by full chunk reads in start_read_op.
-    /*for (list<pair<uint64_t, bufferlist> >::iterator j = i->second.begin();
-	 j != i->second.end();
-	 ++j, ++req_iter, ++riter) {
-      assert(req_iter != rop.to_read.find(i->first)->second.to_read.end());
-      assert(riter != rop.complete[i->first].returned.end());
-      pair<uint64_t, uint64_t> adjusted =
-	sinfo.aligned_offset_len_to_chunk(
-	  make_pair(req_iter->get<0>(), req_iter->get<1>()));
-      assert(adjusted.first == j->first);
-      riter->get<2>()[from].claim(j->second);
-    }*/
     for (list<pair<uint64_t, bufferlist> >::iterator j = i->second.begin();
         j != i->second.end();
         ++req_iter, ++riter) {
@@ -1536,7 +1528,7 @@ void ECBackend::handle_sub_read_reply(
         sinfo.aligned_offset_len_to_chunk(
             make_pair(req_iter->get<0>(), req_iter->get<1>()));
       // If we advance j to the next chunk each time, this should be correct
-      dout(1) << "adjusted.first: " << adjusted.first << " and j->first: "
+      dout(20) << "adjusted.first: " << adjusted.first << " and j->first: "
         << j->first << dendl;
       // Could be that read starts from not-zero element:
       assert(j->first % element_size == 0);
@@ -1552,13 +1544,13 @@ void ECBackend::handle_sub_read_reply(
       // chunk to returned bufferlist in riter.
       riter->get<2>()[from].clear(); // empty buffer
       uint64_t recovery_chunk = get_recovery_chunk_size() / sinfo.get_k();
-      dout(1) << __func__ << "recovery chunk size is: " << recovery_chunk
+      dout(20) << __func__ << "recovery chunk size is: " << recovery_chunk
         << dendl;
       for (; j != i->second.end() && j->first < adjusted.first + recovery_chunk;
           ++j) {
         // Should work also when bl is empty in case of an empty
         // shard read when recovering a coding chunk.
-        dout(1) << __func__ << "read starts in " << j->first << dendl;
+        dout(20) << __func__ << "read starts in " << j->first << dendl;
         riter->get<2>()[from].claim_append(j->second);
       }
     }
@@ -1620,7 +1612,7 @@ void ECBackend::handle_sub_read_reply(
       // Changed interface to required_to_reconstruct
       // required_to_reconstruct returns -EINVAL only if #erasures > 1.
       // It means we'll never enter this sequence in our experiments
-      dout(1) << __func__ << "required_to_reconstruct Flow 1" << dendl;
+      dout(20) << __func__ << "required_to_reconstruct Flow 1" << dendl;
       if ((err = ec_impl->required_to_reconstruct(want_to_read, have,
               &dummy_minimum, static_cast<map<int, set<int> >*>(0))) < 0) {
         dout(20) << __func__ << "required_to_reconstruct failed" << dendl;
@@ -1681,14 +1673,14 @@ void ECBackend::complete_read_op(ReadOp &rop, RecoveryMessages *m)
   assert(rop.to_read.size() == rop.complete.size());
   for (; reqiter != rop.to_read.end(); ++reqiter, ++resiter) {
     if (reqiter->second.cb) { // if request has a callback, call it (i.e. decode)
-      dout(1) << __func__ << "elements map is of len "
+      dout(20) << __func__ << "elements map is of len "
         << resiter->second.elements_map.size() << dendl;
       pair<RecoveryMessages *, read_result_t &> arg(
 	m, resiter->second);
       // In case of a parity element read fault (hash probably), that's how
       // we get informed about it:
       if (!resiter->second.errors.empty()) {
-        dout(0) << "MatanLiramV8: assert empty has failed: " << resiter->second.errors
+        dout(5) << "MatanLiramV8: assert empty has failed: " << resiter->second.errors
           << dendl;
       }
       reqiter->second.cb->complete(arg);
@@ -2045,7 +2037,7 @@ void ECBackend::start_read_op(
   // Still original to_read, didn't cut eements map off it yet
   for (map<hobject_t, read_request_t>::iterator i = to_read.begin();
       i != to_read.end(); ++i) {
-    dout(1) << "MatanLiramV6: start_read_op, elements_map of object " << i->first
+    dout(20) << "MatanLiramV6: start_read_op, elements_map of object " << i->first
       << "is of size " << i->second.elements_map.size() << dendl;
   }
   ceph_tid_t tid = get_parent()->get_tid();
@@ -2083,7 +2075,7 @@ void ECBackend::insert_trivial_chunk_to_messages(
       el != elements.end(); ++el) {
     // insert the to_read of this object a tuple with offset,
     // length, flags
-    dout(1) << __func__ << "adding " << chunk_off_len.first << "-"
+    dout(20) << __func__ << "adding " << chunk_off_len.first << "-"
         << off << "-" << (*el * element_size) << " read of length "
         << element_size << dendl;
     messages[*k].to_read[i->first].push_back(boost::make_tuple(
@@ -2121,7 +2113,7 @@ void ECBackend::insert_conservative_chunk_to_messages(
     }
     // insert the to_read of this object a tuple with offset,
     // length, flags
-    dout(1) << __func__ << "adding " << chunk_off_len.first
+    dout(20) << __func__ << "adding " << chunk_off_len.first
         << "-" << off << "-" << (subchunk_start * element_size)
         << " read of length " << subchunk_len*element_size << dendl;
     messages[*k].to_read[i->first].push_back(boost::make_tuple(
@@ -2144,9 +2136,9 @@ void ECBackend::do_read_op(ReadOp &op)
   dout(10) << __func__ << ": starting read " << op << dendl;
 
   const uint64_t chunk_size = sinfo.get_chunk_size();
-  dout(1) << "MatanLiram start_read_op chunk_size: " << chunk_size << dendl;
+  dout(20) << "MatanLiram start_read_op chunk_size: " << chunk_size << dendl;
   const uint64_t element_size = chunk_size / sinfo.get_row_count();
-  dout(1) << "MatanLiram start_read_op element_size: " << element_size << dendl;
+  dout(20) << "MatanLiram start_read_op element_size: " << element_size << dendl;
   map<pg_shard_t, ECSubRead> messages;
   for (map<hobject_t, read_request_t>::iterator i = op.to_read.begin();
        i != op.to_read.end();
@@ -2165,7 +2157,7 @@ void ECBackend::do_read_op(ReadOp &op)
     // Get elements map from read request
     // inserted change after changed read_request_t
     const map<int, set<int> > &elements_map = i->second.elements_map;
-    dout(1) << __func__ << "got elements map" << dendl;
+    dout(20) << __func__ << "got elements map" << dendl;
     // Initialize by inserting full chunk reads to the complete[].returned array
     for (list<boost::tuple<uint64_t, uint64_t, uint32_t> >::const_iterator j =
 	   i->second.to_read.begin();
@@ -2194,9 +2186,9 @@ void ECBackend::do_read_op(ReadOp &op)
                   chunk_off_len.first, 0, j->get<2>()));
             continue;
           }
-          dout(1) << __func__ << "inside non-parity shard" << dendl;
+          dout(20) << __func__ << "inside non-parity shard" << dendl;
           const set<int> &elements = elements_map.find(k->shard.id)->second;
-          dout(1) << __func__ << "elements: " << elements << "("
+          dout(20) << __func__ << "elements: " << elements << "("
             << k->shard.id << ")" << dendl;
           // MatanLiramDoc: iterate on full chunks in this outer loop
           for (uint64_t off=0; off < chunk_off_len.second; off += chunk_size) {
@@ -2834,7 +2826,7 @@ void ECBackend::objects_read_and_reconstruct(
   map<hobject_t, read_request_t> for_read_op;
   for (auto &&to_read: reads) {
     set<pg_shard_t> shards;
-    dout(1) << __func__ << "flow_y: initializing elements_map" << dendl;
+    dout(20) << __func__ << "flow_y: initializing elements_map" << dendl;
     map<int, set<int> > elements_map = map<int, set<int> >();
     int r = get_min_avail_to_read_shards(
       to_read.first,

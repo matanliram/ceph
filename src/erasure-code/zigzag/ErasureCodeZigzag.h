@@ -21,6 +21,9 @@
 #include "include/err.h"
 #include "erasure-code/ErasureCode.h"
 #include "ErasureCodeConfigurationsZigzag.h"
+extern "C" {
+#include <gf_complete.h>
+}
 
 class ErasureCodeZigzag : public ErasureCode {
 private:
@@ -36,7 +39,12 @@ private:
       return w;
   }
 
-  void galois_multiply(char *region, int multby, int nbytes, char *r2, int add);
+  void galois_multiply(gf_t *gf,
+                       char *region,
+                       unsigned long multby,
+                       int nbytes,
+                       char *r2,
+                       int add);
 
 public:
   int k;
