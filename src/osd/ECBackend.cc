@@ -457,21 +457,23 @@ void ECBackend::handle_recovery_read_complete(
     if (elements_map.size() == 0) {
       from[i->first.shard].claim(i->second);
     } else if (elements_map.find(i->first.shard) == elements_map.end()) {
-      from[i->first.shard].append_zero(sinfo.get_chunk_size());
+      dout(20) << __func__ << " Empty buffer since we read a chunk not in elements map."
+               << dendl;
+      //from[i->first.shard].append_zero(sinfo.get_chunk_size());
+      from[i->first.shard].clear();
     } else { // elements_map is relevant to this chunk
       // risky change here
       from[i->first.shard].clear();
-      assert(elements_map.find(i->first.shard) != elements_map.end());
       const set<int> &elements = elements_map.find(i->first.shard)->second;
-      int prev_element = 0;
-      int count = 0; // element num
-      for (set<int>::const_iterator j = elements.begin(); j != elements.end();
-          ++j, ++count) {
+      int following_element = 0; // After an iteration, the next element to be inserted
+      set<int>::const_iterator j;
+      int count = 0;
+      for (j = elements.begin(), count = 0; j != elements.end(); ++j, ++count) {
         // number of zero element blocks needed to add to decode
-        const int zero_size = *j - prev_element;
+        const int zero_size = *j - following_element;
         dout(20) << __func__ << "zero size: " << zero_size << dendl;
         // we don't nullify the element itself, therefore the +1 is important
-        prev_element = *j+1;
+        following_element = *j+1;
         // append zeros if needed:
         if (zero_size > 0) {
           from[i->first.shard].append_zero(element_size * zero_size);
@@ -483,14 +485,16 @@ void ECBackend::handle_recovery_read_complete(
         // TODO: optimize to append more than 1 element if possible.
       }
       // zeroes up to the last row
-      if (sinfo.get_row_count() - prev_element > 0) {
+      if (sinfo.get_row_count() - following_element > 0) {
         from[i->first.shard].append_zero(
-            element_size * (sinfo.get_row_count() - prev_element));
+            element_size * (sinfo.get_row_count() - following_element));
       }
       assert(from[i->first.shard].length() == sinfo.get_chunk_size());
     }
   } // end of chunk iteration for loop
   dout(10) << __func__ << ": " << from << dendl;
+  dout(1) << __func__ << " total_data_size: " << from.begin()->second.length() << " chunk size: "
+          << sinfo.get_chunk_size() << dendl;
   int r = ECUtil::decode(sinfo, ec_impl, from, target);
   assert(r == 0);
   if (attrs) {
@@ -1194,7 +1198,8 @@ bool ECBackend::handle_trivial_sub_read(
       // the state of our chunk in case other chunks could substitute.
       assert(hinfo->has_chunk_hash());
       if ((bl.length() == hinfo->get_total_chunk_size()) &&
-          (j->template get<0>() == 0)) {
+          (j->template get<0>() == 0) &&
+          (i->second.size() == 1)) {
         dout(20) << __func__ << ": Checking hash of " << i->first << dendl;
         bufferhash h(-1);
         h << bl;
